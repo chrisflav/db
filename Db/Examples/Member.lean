@@ -1,5 +1,4 @@
 import Db.Utils.VarChar
-import Db.Model.Schema
 
 mutual
 
@@ -24,19 +23,3 @@ def peter : Member where
   name := v"Peter"
   age := 42
   groups := #[leaders]
-
--- in a future version, these should be automatically generated
-def Member.schema : Schema where
-  name := "member"
-  columns :=
-    [ .mk "name" (.elementary <| .varchar 30)
-    , .mk "age" (.elementary <| .int)
-    , .mk "groups" (.many <| .mk "group")]
-  keys := [.mk "name"]
-
-def Group.schema : Schema where
-  name := "group"
-  columns :=
-    [ .mk "name" (.elementary <| .varchar 20)
-    , .mk "leaders" (.many <| .mk "member")]
-  keys := [.mk "name"]
