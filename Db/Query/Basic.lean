@@ -1,3 +1,8 @@
+/-
+Copyright (c) 2025 Christian Merten. All rights reserved.
+Released under Apache 2.0 license as described in the file LICENSE.
+Authors: Christian Merten
+-/
 import Std
 import Db.Utils.VarChar
 
@@ -49,6 +54,9 @@ def Database.Ident.column {d : Database} (i : d.Ident) : Column :=
 def Database.Ident.dbtype {d : Database} (i : d.Ident) : DBType :=
   i.column.type
 
+def Database.Ident.toString {d : Database} (i : d.Ident) : String :=
+  s!"{i.tableName}.{i.columnName}"
+
 def Table.idents {d : Database} (tname : String) (ht : d.HasTable tname) : Std.HashSet d.Ident :=
   .ofList (d.tables[tname].columns.toList.pmap (P := fun a ↦ a ∈ d.tables[tname].columns.toList)
     (fun c hmem ↦ ⟨tname, c.1, ht, by grind⟩) (by grind))
@@ -67,6 +75,8 @@ inductive DBExpr (d : Database) : DBType → Type 1 where
   | false : DBExpr d .bool
   | and (e₁ e₂ : DBExpr d .bool) : DBExpr d .bool
   | eq {t : DBType} (e₁ e₂ : DBExpr d t) : DBExpr d .bool
+  | var (i : d.Ident) (t : DBType) : DBExpr d t
+  | str {n : Nat} (s : VarChar n) : DBExpr d (.varchar n)
 
 inductive Database.Name (d : Database) where
   | ident (i : d.Ident) : Name d
@@ -76,6 +86,10 @@ inductive Database.Name (d : Database) where
 def Database.Name.dbtype {d : Database} : d.Name → DBType
   | .ident i => i.dbtype
   | .computation _ t => t
+
+def Database.Name.toString {d : Database} : d.Name → String
+  | .ident i => i.toString
+  | .computation s _ => s
 
 def Table.names {d : Database} (tname : String) (ht : d.HasTable tname := by grind) :
     Std.HashSet d.Name :=
@@ -93,21 +107,24 @@ inductive Query (d : Database) : Std.HashSet d.Name → Type 1 where
 def signature {d : Database} (s : Std.HashSet d.Name) : Std.HashMap d.Name DBType :=
   s.inner.map (fun n _ ↦ n.dbtype)
 
+structure Database.Insert (d : Database) (tableName : String)
+    (ht : d.HasTable tableName := by grind) where
+
+/-
 def authors : Table where
   columns := .ofList
     [⟨"id", ⟨.int⟩⟩,
      ⟨"name", ⟨.varchar 100⟩⟩,
      ⟨"modern", ⟨.bool⟩⟩]
+-/
 
-def books : Table where
+def fish : Table where
   columns := .ofList
-    [⟨"name", ⟨.varchar 100⟩⟩,
-     ⟨"author", ⟨.varchar 100⟩⟩]
+    [⟨"name", ⟨.varchar 100⟩⟩, ⟨"length", ⟨.int⟩⟩]
 
 abbrev database : Database where
   tables := .ofList
-    [⟨"author", authors⟩,
-     ⟨"book", books⟩]
+    [⟨"fish", fish⟩]
 
-example : Query database (Table.names "author") :=
-  .filter (.all "author") .true
+--example : Query database (Table.names "author") :=
+--  .filter (.all "author") .true
