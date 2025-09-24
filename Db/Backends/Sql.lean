@@ -72,11 +72,6 @@ end SQL
 
 section Tests
 
-def nameIdent : database.Ident where
-  tableName := "fish"
-  columnName := "name"
-  hasColumn := by grind [fish]
-
 def q := SQL.Select.fromQuery (d := database) (.filter (.all "fish")
   (.eq (.var nameIdent (.varchar 100)) (.str ⟨"Swordfish", by decide⟩)))
 

@@ -4,19 +4,17 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Christian Merten
 -/
 import Db
-import Db.Backends.PostgreSQL.Basic
+import Db.Backends.PostgreSQL.Interpretation
 
 def main : IO Unit := do
-  let conn ← PostgreSQL.connect "postgresql://testuser:secret@localhost/testdb2"
-  match conn with
-  | some conn =>
-    let res ← conn.exec "SELECT * FROM fish"
-    match res with
-    | .data data =>
-      IO.println s!"Table OID of col 0: {data.raw.ftable 0}"
-      IO.println s!"Returned {data.nrows} rows with {data.ncolumns} columns."
-      let columns := data.columns
-      IO.println s!"Lengths: {columns["length"]!}"
-    | _ => IO.println "Unexpected response."
-  | none =>
-    IO.println "Connection failed."
+  let q : Query database _ := .all "fish"
+  let x : PostgreSQL.M _ := DBMonad.lookup q
+  let res ← PostgreSQL.runDB "postgresql://testuser:secret@localhost/testdb2" x
+  match res with
+  | .error _ => IO.println "Error occured."
+  | .ok val =>
+    let name : database.Name :=
+      .ident { tableName := "fish", columnName := "name", column := ⟨.varchar 100⟩ }
+    let x : name.dbtype.Value := val[0]!.get! name
+    let x : VarChar 100 := x
+    IO.println s!"Name of first fish is: {x}."

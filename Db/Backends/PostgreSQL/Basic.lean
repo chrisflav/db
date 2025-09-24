@@ -4,7 +4,10 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Christian Merten
 -/
 import Std
+import Lean.Data.Json.Parser
+import Lean.Data.Json.FromToJson.Basic
 import Db.Backends.PostgreSQL.FFI.Basic
+import Db.Utils.FromString
 
 def Fin.range (n : Nat) : List (Fin n) :=
   (List.range n).pmap (P := fun x ↦ x ∈ List.range n) (fun k hk ↦ ⟨k, by grind⟩) (by simp)
@@ -88,11 +91,33 @@ instance : ToString Value where
   | .int n => toString n
   | .raw s => s!"raw({s})"
 
+open Lean
+
 -- TODO: instead of returning `raw`, return the cast `Value`
+instance : FromJson Value where
+  fromJson?
+    | .null => .error "Not implemented!"
+    | .bool b => .ok <| .bool b
+    | .num _ => .ok (.raw "foo")
+    | .str s => .ok <| .string s
+    | _ => .error "Not a simple type."
+
+def Value.fromString (s : String) : Value :=
+  let x : Except String Value := do FromJson.fromJson? (← Json.parse s)
+  match x with
+  | .error _ => .raw s
+  | .ok a => a
+
 /-- The parsed value of the given field. -/
 def ResultData.value (data : ResultData) (rowNumber : Fin data.nrows)
     (columnNumber : Fin data.ncolumns) : Value :=
-  .raw (data.rawValue rowNumber columnNumber)
+  .fromString (data.rawValue rowNumber columnNumber)
+
+/-- The parsed value of the given field. -/
+def ResultData.valueWithExpectedType (data : ResultData) (rowNumber : Fin data.nrows)
+    (columnNumber : Fin data.ncolumns) (α : Type) [FromString α] :
+    Option α :=
+  FromString.fromString (data.rawValue rowNumber columnNumber)
 
 /-- The map `ColumnName → Value` of the `rowNumber`-th row. -/
 def ResultData.row (data : ResultData) (rowNumber : Fin data.nrows) :
@@ -101,6 +126,18 @@ def ResultData.row (data : ResultData) (rowNumber : Fin data.nrows) :
   for i in Fin.range data.ncolumns do
     map := map.insert (data.columnName i) (data.value rowNumber i)
   return map
+
+/-- The map `ColumnName → Value` of the `rowNumber`-th row. -/
+def ResultData.rawRow (data : ResultData) (rowNumber : Fin data.nrows) :
+    Std.HashMap String String := Id.run <| do
+  let mut map := .emptyWithCapacity
+  for i in Fin.range data.ncolumns do
+    map := map.insert (data.columnName i) (data.rawValue rowNumber i)
+  return map
+
+/-- The array of all rows in `data`. -/
+def ResultData.rawRows (data : ResultData) : Array (Std.HashMap String String) :=
+  (Fin.range data.nrows).toArray.map (fun i ↦ data.rawRow i)
 
 /-- The array of all rows in `data`. -/
 def ResultData.rows (data : ResultData) : Array (Std.HashMap String Value) :=

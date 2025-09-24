@@ -5,6 +5,7 @@ Authors: Christian Merten
 -/
 import Std
 import Db.Utils.VarChar
+import Db.Utils.FromString
 
 inductive DBType where
   | bool : DBType
@@ -12,14 +13,34 @@ inductive DBType where
   | varchar (n : Nat) : DBType
   deriving BEq, Repr, DecidableEq, Hashable
 
-protected def DBType.Value : DBType → Type
+protected abbrev DBType.Value : DBType → Type
   | .bool => Bool
   | .varchar n => VarChar n
   | .int => Int
 
+instance (t : DBType) : ToString t.Value where
+  toString x :=
+    match t with
+    | .bool => toString x
+    | .varchar _ => toString x
+    | .int => toString x
+
+instance (t : DBType) : Inhabited t.Value where
+  default :=
+    match t with
+    | .bool => default
+    | .varchar _ => ⟨"", by simp⟩
+    | .int => default
+
+-- TODO: fix this
+instance : (t : DBType) → FromString t.Value
+  | .bool => { fromString _ := some false }
+  | .int => { fromString _ := some 0 }
+  | .varchar n => { fromString s := if h : s.length ≤ n then some ⟨s, by grind⟩ else none }
+
 structure Column where
   type : DBType
-  deriving BEq, Repr
+  deriving Repr, Hashable, DecidableEq
 
 structure Table where
   columns : Std.HashMap String Column
@@ -40,16 +61,40 @@ structure Database.Ident (d : Database) where
   columnName : String
   hasTable : d.HasTable tableName := by grind
   hasColumn : columnName ∈ d.tables[tableName].columns := by grind
-  deriving BEq, Hashable
-  -- btype_eq : d.tables[table].columns[column].btype = t := by grind
+  column : Column := d.tables[tableName].columns[columnName]
+  column_eq : d.tables[tableName].columns[columnName] = column := by grind
+  deriving DecidableEq, Hashable
 
 attribute [grind] Database.Ident.hasTable Database.Ident.hasColumn
 
 def Database.Ident.table {d : Database} (i : d.Ident) : Table :=
   d.tables[i.tableName]'(by grind)
 
-def Database.Ident.column {d : Database} (i : d.Ident) : Column :=
-  ((d.tables[i.tableName]'(by grind)).columns)[i.columnName]'(by grind)
+inductive List.HasElem {α : Type} : List (String × α) → String → Type
+  | here (key : String) (x : α) (l : List (String × α)) : HasElem ((key, x) :: l) key
+  | there {key : String} {x : α} {l : List (String × α)}
+      (h : l.HasElem key) (y : String × α) : HasElem (y :: l) key
+
+def List.HasElem.get {α : Type} {l : List (String × α)} {key : String} :
+      l.HasElem key → α
+  | here key x l => x
+  | there h y => h.get
+
+structure List.HasElem' {α : Type} (l : List (String × α)) (key : String) where
+  idx : Fin l.length
+  x : α
+  h : l[idx] = (key, x)
+
+def List.HasElem'.get {α : Type} (l : List (String × α)) (key : String)
+    (h : l.HasElem' key) : α :=
+  h.x
+
+abbrev foo : List (String × Nat) := [("foo", 3), ("bar", 5)]
+
+abbrev fooHasElem : foo.HasElem "foo" := by
+  repeat constructor
+
+example : fooHasElem.get = 3 := rfl
 
 def Database.Ident.dbtype {d : Database} (i : d.Ident) : DBType :=
   i.column.type
@@ -59,7 +104,7 @@ def Database.Ident.toString {d : Database} (i : d.Ident) : String :=
 
 def Table.idents {d : Database} (tname : String) (ht : d.HasTable tname) : Std.HashSet d.Ident :=
   .ofList (d.tables[tname].columns.toList.pmap (P := fun a ↦ a ∈ d.tables[tname].columns.toList)
-    (fun c hmem ↦ ⟨tname, c.1, ht, by grind⟩) (by grind))
+    (fun c hmem ↦ ⟨tname, c.1, ht, by grind, c.2, by grind⟩) (by grind))
 
 instance (d : Database) (name : String) : Decidable (d.HasTable name) :=
   inferInstanceAs <| Decidable (name ∈ d.tables)
@@ -81,7 +126,7 @@ inductive DBExpr (d : Database) : DBType → Type 1 where
 inductive Database.Name (d : Database) where
   | ident (i : d.Ident) : Name d
   | computation (n : String) (t : DBType) : Name d
-  deriving BEq, Hashable
+  deriving DecidableEq, Hashable
 
 def Database.Name.dbtype {d : Database} : d.Name → DBType
   | .ident i => i.dbtype
@@ -94,7 +139,7 @@ def Database.Name.toString {d : Database} : d.Name → String
 def Table.names {d : Database} (tname : String) (ht : d.HasTable tname := by grind) :
     Std.HashSet d.Name :=
   .ofList (d.tables[tname].columns.toList.pmap (P := fun a ↦ a ∈ d.tables[tname].columns.toList)
-    (fun c hmem ↦ .ident ⟨tname, c.1, ht, by grind⟩) (by grind))
+    (fun c hmem ↦ .ident ⟨tname, c.1, ht, by grind, c.2, by grind⟩) (by grind))
 
 -- TODO: add join operations
 /--
@@ -118,7 +163,7 @@ def authors : Table where
      ⟨"modern", ⟨.bool⟩⟩]
 -/
 
-def fish : Table where
+abbrev fish : Table where
   columns := .ofList
     [⟨"name", ⟨.varchar 100⟩⟩, ⟨"length", ⟨.int⟩⟩]
 
@@ -126,5 +171,11 @@ abbrev database : Database where
   tables := .ofList
     [⟨"fish", fish⟩]
 
---example : Query database (Table.names "author") :=
---  .filter (.all "author") .true
+def nameIdent : database.Ident where
+  tableName := "fish"
+  columnName := "length"
+  column := ⟨.int⟩
+
+example : nameIdent.dbtype = .int := rfl
+
+example : nameIdent.dbtype.Value := (3 : Int)
