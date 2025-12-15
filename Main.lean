@@ -4,6 +4,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Christian Merten
 -/
 import Db
+import Db.Examples.Fish
 import Db.Backends.PostgreSQL.Interpretation
 
 def main : IO Unit := do

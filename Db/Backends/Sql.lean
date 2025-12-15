@@ -90,20 +90,3 @@ def Insert.toString (ins : Insert) : String :=
   s!"INSERT INTO {ins.intoTable} ({", ".intercalate (ins.values.map Prod.fst)}) VALUES ({", ".intercalate (ins.values.map fun x => x.2.toString)})"
 
 end SQL
-
-section Tests
-
-def q := SQL.Select.fromQuery (d := database) (.filter (.all DatabaseIndex.fish)
-  (.eq (.var nameIdent (.varchar 100)) (.str ⟨"Swordfish", by decide⟩)))
-
-def ins : SQL.Insert where
-  intoTable := "fish"
-  values := [⟨"name", .str "Aal"⟩, ⟨"length", .int 56⟩]
-
-def ins2 : SQL.Insert :=
-  SQL.Insert.fromInsert (d := database) (tableName := .fish)
-    { values
-        | .name => ⟨"Aal", by decide⟩
-        | .length => 56 }
-
-end Tests
