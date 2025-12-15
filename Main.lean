@@ -7,14 +7,30 @@ import Db
 import Db.Backends.PostgreSQL.Interpretation
 
 def main : IO Unit := do
-  let q : Query database _ := .all "fish"
-  let x : PostgreSQL.M _ := DBMonad.lookup q
+  let nameIdent : database.Ident :=
+    { tableName := .fish, columnName := .name, column := ⟨.varchar 100⟩ }
+  let name : database.Name :=
+    .ident { tableName := .fish, columnName := .name, column := ⟨.varchar 100⟩ }
+  let lengthIdent : database.Ident :=
+    { tableName := .fish, columnName := .length, column := ⟨.int⟩ }
+  let length : database.Name :=
+    .ident lengthIdent
+  let ins : database.Insert .fish :=
+    { values
+        | .name => ⟨"Aal", by decide⟩
+        | .length => 56 }
+  let q : Query database _ :=
+    .filter
+      (.all (DatabaseIndex.fish))
+      (.eq (.var nameIdent (.varchar 100)) (.str ⟨"Aal", by decide⟩))
+  let x : PostgreSQL.M _ := do
+    _ ← DBMonad.insert ins
+    DBMonad.lookup q
   let res ← PostgreSQL.runDB "postgresql://testuser:secret@localhost/testdb2" x
   match res with
   | .error _ => IO.println "Error occured."
   | .ok val =>
-    let name : database.Name :=
-      .ident { tableName := "fish", columnName := "name", column := ⟨.varchar 100⟩ }
-    let x : name.dbtype.Value := val[0]!.get! name
-    let x : VarChar 100 := x
-    IO.println s!"Name of first fish is: {x}."
+    for row in val do
+      let x : VarChar 100 := row.get! name
+      let l : Int := row.get! length
+      IO.println s!"Fish {x} has length {l}."

@@ -13,3 +13,7 @@ class DBMonad (d : Database) (m : Type → Type) where
   /-- Lookup the given query on the database. -/
   lookup {names : Std.HashSet d.Name} (q : Query d names) :
     m (Array (Std.DHashMap d.Name (fun d ↦ d.dbtype.Value)))
+  /-- Insert the given data into the database. Return true if successful, false otherwise. -/
+  insert {name : d.Index} (data : d.Insert name) : m Unit
+  /-- Delete rows matching the expression. Return number of deleted rows. -/
+  delete (e : DBExpr d .bool) : m Nat

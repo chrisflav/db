@@ -7,6 +7,17 @@ import Std
 import Db.Utils.VarChar
 import Db.Utils.FromString
 
+class Indexing (α : Type) : Type where
+  [decidableEq : DecidableEq α]
+  [hashable : Hashable α]
+  [toString : ToString α]
+  [fromString : FromString α]
+  -- TODO: add axioms?
+  all (α) : Std.HashSet α
+  fromString_toString (x : α) : FromString.fromString (ToString.toString x) = some x := by grind
+
+attribute [instance] Indexing.decidableEq Indexing.hashable Indexing.toString Indexing.fromString
+
 inductive DBType where
   | bool : DBType
   | int : DBType
@@ -32,43 +43,42 @@ instance (t : DBType) : Inhabited t.Value where
     | .varchar _ => ⟨"", by simp⟩
     | .int => default
 
--- TODO: fix this
 instance : (t : DBType) → FromString t.Value
-  | .bool => { fromString _ := some false }
-  | .int => { fromString _ := some 0 }
-  | .varchar n => { fromString s := if h : s.length ≤ n then some ⟨s, by grind⟩ else none }
+  | .bool => inferInstance
+  | .int => inferInstance
+  | .varchar _ => inferInstance
 
 structure Column where
   type : DBType
   deriving Repr, Hashable, DecidableEq
 
 structure Table where
-  columns : Std.HashMap String Column
+  Index : Type
+  [indexing : Indexing Index]
+  columns : Index → Column
+
+attribute [instance] Table.indexing
 
 structure Database where
-  tables : Std.HashMap String Table
+  Index : Type
+  [indexing : Indexing Index]
+  tables : Index → Table
 
-@[grind]
-def Database.HasTable (d : Database) (name : String) : Prop :=
-  name ∈ d.tables
+attribute [instance] Database.indexing
 
-@[grind]
-def Table.HasColumn (t : Table) (name : String) : Prop :=
-  name ∈ t.columns
+--@[grind]
+--def Table.HasColumn (t : Table) (name : String) : Prop :=
+--  name ∈ t.columns
 
 structure Database.Ident (d : Database) where
-  tableName : String
-  columnName : String
-  hasTable : d.HasTable tableName := by grind
-  hasColumn : columnName ∈ d.tables[tableName].columns := by grind
-  column : Column := d.tables[tableName].columns[columnName]
-  column_eq : d.tables[tableName].columns[columnName] = column := by grind
+  tableName : d.Index
+  columnName : (d.tables tableName).Index
+  column : Column := (d.tables tableName).columns columnName
+  column_eq : (d.tables tableName).columns columnName = column := by grind
   deriving DecidableEq, Hashable
 
-attribute [grind] Database.Ident.hasTable Database.Ident.hasColumn
-
 def Database.Ident.table {d : Database} (i : d.Ident) : Table :=
-  d.tables[i.tableName]'(by grind)
+  d.tables i.tableName
 
 inductive List.HasElem {α : Type} : List (String × α) → String → Type
   | here (key : String) (x : α) (l : List (String × α)) : HasElem ((key, x) :: l) key
@@ -102,19 +112,6 @@ def Database.Ident.dbtype {d : Database} (i : d.Ident) : DBType :=
 def Database.Ident.toString {d : Database} (i : d.Ident) : String :=
   s!"{i.tableName}.{i.columnName}"
 
-def Table.idents {d : Database} (tname : String) (ht : d.HasTable tname) : Std.HashSet d.Ident :=
-  .ofList (d.tables[tname].columns.toList.pmap (P := fun a ↦ a ∈ d.tables[tname].columns.toList)
-    (fun c hmem ↦ ⟨tname, c.1, ht, by grind, c.2, by grind⟩) (by grind))
-
-instance (d : Database) (name : String) : Decidable (d.HasTable name) :=
-  inferInstanceAs <| Decidable (name ∈ d.tables)
-
-def Database.HasTable.get {d : Database} {name : String} (h : d.HasTable name) : Table :=
-  d.tables[name]
-
-def Database.HasColumn (d : Database) (table : String) (column : String) : Prop :=
-  ∃ (h : d.HasTable table), column ∈ d.tables[table].columns
-
 inductive DBExpr (d : Database) : DBType → Type 1 where
   | true : DBExpr d .bool
   | false : DBExpr d .bool
@@ -136,24 +133,24 @@ def Database.Name.toString {d : Database} : d.Name → String
   | .ident i => i.toString
   | .computation s _ => s
 
-def Table.names {d : Database} (tname : String) (ht : d.HasTable tname := by grind) :
+def Table.names {d : Database} (tname : d.Index) :
     Std.HashSet d.Name :=
-  .ofList (d.tables[tname].columns.toList.pmap (P := fun a ↦ a ∈ d.tables[tname].columns.toList)
-    (fun c hmem ↦ .ident ⟨tname, c.1, ht, by grind, c.2, by grind⟩) (by grind))
+  .ofList ((Indexing.all (d.tables tname).Index).toList.map
+    fun i ↦ .ident ⟨tname, i, (d.tables tname).columns i, rfl⟩)
 
 -- TODO: add join operations
 /--
 A query on the database `d` indexed over the (unique) names of the outputs.
 -/
 inductive Query (d : Database) : Std.HashSet d.Name → Type 1 where
-  | all (table : String) (ht : d.HasTable table := by grind) : Query d (Table.names table ht)
+  | all (table : d.Index) : Query d (Table.names table)
   | filter {s : Std.HashSet d.Name} (q : Query d s) (e : DBExpr d .bool) : Query d s
 
 def signature {d : Database} (s : Std.HashSet d.Name) : Std.HashMap d.Name DBType :=
   s.inner.map (fun n _ ↦ n.dbtype)
 
-structure Database.Insert (d : Database) (tableName : String)
-    (ht : d.HasTable tableName := by grind) where
+structure Database.Insert (d : Database) (tableName : d.Index) where
+  values (col : (d.tables tableName).Index) : ((d.tables tableName).columns col).type.Value
 
 /-
 def authors : Table where
@@ -163,17 +160,57 @@ def authors : Table where
      ⟨"modern", ⟨.bool⟩⟩]
 -/
 
+inductive FishIndex where
+  | name
+  | length
+  deriving DecidableEq, Hashable, Repr
+
+instance : ToString FishIndex where
+  toString
+    | .name => "name"
+    | .length => "length"
+
+instance : FromString FishIndex where
+  fromString
+    | "name" => some .name
+    | "length" => some .length
+    | _ => none
+
+instance : Indexing FishIndex where
+  all := {.name, .length}
+  fromString_toString x := by induction x <;> rfl
+
 abbrev fish : Table where
-  columns := .ofList
-    [⟨"name", ⟨.varchar 100⟩⟩, ⟨"length", ⟨.int⟩⟩]
+  Index := FishIndex
+  columns
+    | .name => ⟨.varchar 100⟩
+    | .length => ⟨.int⟩
+
+inductive DatabaseIndex where
+  | fish
+  deriving DecidableEq, Hashable, Repr
+
+instance : ToString DatabaseIndex where
+  toString
+    | .fish => "fish"
+
+instance : FromString DatabaseIndex where
+  fromString
+    | "fish" => some .fish
+    | _ => none
+
+instance : Indexing DatabaseIndex where
+  all := {.fish}
+  fromString_toString x := by induction x <;> rfl
 
 abbrev database : Database where
-  tables := .ofList
-    [⟨"fish", fish⟩]
+  Index := DatabaseIndex
+  tables
+    | .fish => fish
 
 def nameIdent : database.Ident where
-  tableName := "fish"
-  columnName := "length"
+  tableName := .fish
+  columnName := .length
   column := ⟨.int⟩
 
 example : nameIdent.dbtype = .int := rfl

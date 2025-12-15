@@ -9,13 +9,12 @@ import Db.Backends.Sql
 import Db.Interpretation.Basic
 
 def Database.resolveName (d : Database) (tableName columnName : String) : Option d.Name :=
-  if ht : tableName ∈ d.tables then
-    if hc : columnName ∈ d.tables[tableName].columns then
-      some (.ident { tableName := tableName, columnName := columnName })
-    else
-      none
-  else
-    none
+  match (FromString.fromString tableName : Option d.Index) with
+  | some tableName =>
+    match (FromString.fromString columnName : Option (d.tables tableName).Index) with
+    | some columnName => some (.ident { tableName := tableName, columnName := columnName })
+    | none => none
+  | none => none
 
 namespace PostgreSQL
 
@@ -57,35 +56,12 @@ instance (d : Database) : DBMonad d M where
             else
               pure ()
           return map
-        --let mut rows := #[]
-        --for i in Fin.range data.nrows do
-        --  let row : Std.DHashMap d.Name fun n => n.dbtype.Value ← do
-        --    let mut map := default
-        --    for name in names do
-        --      map := map.insert name _
-        --    pure map
-        --  rows := rows.push row
-        --return rows
     | _ => throw .fatal
-
-/-
-    data.rows.mapM <| fun map ↦ do
-        let mut result := .emptyWithCapacity
-        for (name, value) in map do
-          match name.splitOn "." with
-          | [tableName, columnName] =>
-              match d.resolveName tableName columnName with
-              | some (.ident i) =>
-                match value with
-                | .raw s => _
-                | .int n => _
-                | .bool b => result := result.insert (.ident i) (unsafeCast b)
-                | .string s => result := result.insert (.ident i) (unsafeCast s)
-                --have heq : (Database.Name.ident i).dbtype.Value = VarChar 100 := sorry
-                --result := result.insert (.ident i) sorry
-              | _ => pure ()
-          | _ => pure ()
-        return result
-    -/
+  insert {table} data := do
+    let conn := (← get).connection
+    let sql : SQL.Insert := .fromInsert data
+    _ ← conn.exec sql.toString
+  delete _ :=
+    throw .fatal
 
 end PostgreSQL
