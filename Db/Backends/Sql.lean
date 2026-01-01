@@ -4,6 +4,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Christian Merten
 -/
 import Db.Interpretation.Basic
+import Std.Data.HashSet.Basic
 
 namespace SQL
 
@@ -84,9 +85,103 @@ def Insert.fromInsert {d : Database} {tableName : d.Index} (ins : d.Insert table
   intoTable := ToString.toString tableName
   values :=
     (Indexing.all (d.tables tableName).Index).toList.map
-      fun colName => ⟨ToString.toString colName, .ofValue (ins.values colName)⟩
+      fun colName => ⟨ToString.toString colName, .ofValue (ins.entry.values colName)⟩
 
 def Insert.toString (ins : Insert) : String :=
   s!"INSERT INTO {ins.intoTable} ({", ".intercalate (ins.values.map Prod.fst)}) VALUES ({", ".intercalate (ins.values.map fun x => x.2.toString)})"
+
+def DBType.toString : DBType → String
+  | .int => "integer"
+  | .varchar n => s!"varchar({n})"
+  | .bool => "bool"
+
+namespace Migration
+
+structure FieldDef where
+  name : String
+  type : String
+
+def FieldDef.toString (fieldDef : FieldDef) : String :=
+  s!"{fieldDef.name}  {fieldDef.type}"
+
+def FieldDef.fromColumn (column : Column) (name : String) : FieldDef where
+  name := name
+  type := DBType.toString column.type
+
+-- TODO: fill placeholder implementation
+structure ConstraintDef where
+  name : String
+
+def ConstraintDef.toString (constraintDef : ConstraintDef) : String :=
+  s!"{constraintDef.name}"
+
+structure CreateTable where
+  tableName : String
+  fields : List FieldDef
+  constraints : List ConstraintDef
+
+def CreateTable.fromTable (table : Table) (name : String) : CreateTable where
+  tableName := name
+  fields := (Indexing.all table.Index).toList.map
+    fun i ↦ .fromColumn (table.columns i) (toString i)
+  -- TODO: fill placeholder implementation
+  constraints := []
+
+def CreateTable.toString (cmd : CreateTable) : String :=
+  letI fields : List String := cmd.fields.map FieldDef.toString
+  letI constraints : List String := cmd.constraints.map ConstraintDef.toString
+  s!"CREATE TABLE {cmd.tableName}
+    {"\n,".intercalate fields}
+    {"\n,".intercalate constraints}
+  )"
+
+inductive AlterColumnCommand where
+  | setType (type : String)
+
+def AlterColumnCommand.toString : AlterColumnCommand → String
+  | setType type => s!"TYPE {type}"
+
+inductive AlterTableCommand where
+  | addColumn (field : FieldDef)
+  | dropColumn (name : String)
+  | renameColumn (oldName newName : String)
+  | alterColumn (name : String) (cmd : AlterColumnCommand)
+
+def AlterTableCommand.toString : AlterTableCommand → String
+  | addColumn field => s!"ADD COLUMN {field.toString}"
+  | renameColumn oldName newName => s!"RENAME COLUMN {oldName} TO {newName}"
+  | alterColumn name cmd => s!"ALTER COLUMN {name} {cmd.toString}"
+  | dropColumn name => s!"DROP COLUMN {name}"
+
+structure AlterTable where
+  tableName : String
+  commands : List AlterTableCommand
+
+def AlterTable.toString (cmd : AlterTable) : String :=
+  letI commands : List String := cmd.commands.map AlterTableCommand.toString
+  s!"ALTER TABLE {cmd.tableName}
+    {"\n,".intercalate commands}
+  "
+
+def AlterTable.fromMap (tableName : String) {source target : Table}
+    (map : source.Index → Option target.Index) :
+    AlterTable where
+  tableName := tableName
+  commands := Id.run <| do
+    let mut ops := []
+    let mut visited : Std.HashSet target.Index := .emptyWithCapacity
+    for index in Indexing.all source.Index do
+      match map index with
+      | some val =>
+        visited := visited.insert val
+        if s!"{index}" != s!"{val}" then
+          ops := .renameColumn s!"{index}" s!"{val}" :: ops
+        if source.columns index != target.columns val then
+          ops := .alterColumn s!"{val}" (.setType <| DBType.toString (target.columns val).type) :: ops
+      | none =>
+        ops := .dropColumn s!"{index}" :: ops
+    return ops
+
+end Migration
 
 end SQL

@@ -3,6 +3,7 @@ Copyright (c) 2025 Christian Merten. All rights reserved.
 Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Christian Merten
 -/
+import Init.Data.Function
 import Db
 
 inductive FishIndex where
@@ -28,8 +29,8 @@ instance : Indexing FishIndex where
 abbrev fish : Table where
   Index := FishIndex
   columns
-    | .name => ⟨.varchar 100⟩
-    | .length => ⟨.int⟩
+    | .name => ⟨.varchar 100, false⟩
+    | .length => ⟨.int, false⟩
 
 inductive DatabaseIndex where
   | fish
@@ -56,7 +57,7 @@ abbrev database : Database where
 def nameIdent : database.Ident where
   tableName := .fish
   columnName := .length
-  column := ⟨.int⟩
+  column := ⟨.int, false⟩
 
 example : nameIdent.dbtype = .int := rfl
 
@@ -71,6 +72,42 @@ def ins : SQL.Insert where
 
 def ins2 : SQL.Insert :=
   SQL.Insert.fromInsert (d := database) (tableName := .fish)
-    { values
+    { entry.values
         | .name => ⟨"Aal", by decide⟩
         | .length => 56 }
+
+structure Fish where
+  name : VarChar 100
+  length : Int
+
+def Fish.toEntry (f : Fish) : fish.Entry where
+  values
+    | .name => f.name
+    | .length => f.length
+
+def Fish.fromEntry (e : fish.Entry) : Fish where
+  name := e.values .name
+  length := e.values .length
+
+structure Many (α : Type) : Type where
+
+class HasKey (α : Type) where
+  Key : Type
+  key : α → Key
+  -- key_injective {x y : α} (h : key x = key y) : x = y
+
+export HasKey (Key)
+
+structure Person where
+  id : Int
+  name : VarChar 50
+  age : Int
+
+instance : HasKey Person where
+  Key := Int
+  key := Person.id
+
+structure Lake where
+  name : VarChar 50
+  fish : Many Fish
+  owner : Key Person

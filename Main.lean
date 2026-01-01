@@ -9,20 +9,20 @@ import Db.Backends.PostgreSQL.Interpretation
 
 def main : IO Unit := do
   let nameIdent : database.Ident :=
-    { tableName := .fish, columnName := .name, column := ⟨.varchar 100⟩ }
+    { tableName := .fish, columnName := .name, column := ⟨.varchar 100, false⟩ }
   let name : database.Name :=
-    .ident { tableName := .fish, columnName := .name, column := ⟨.varchar 100⟩ }
+    .ident { tableName := .fish, columnName := .name, column := ⟨.varchar 100, false⟩ }
   let lengthIdent : database.Ident :=
-    { tableName := .fish, columnName := .length, column := ⟨.int⟩ }
+    { tableName := .fish, columnName := .length, column := ⟨.int, false⟩ }
   let length : database.Name :=
     .ident lengthIdent
   let ins : database.Insert .fish :=
-    { values
+    { entry.values
         | .name => ⟨"Aal", by decide⟩
         | .length => 56 }
   let q : Query database _ :=
     .filter
-      (.all (DatabaseIndex.fish))
+      (.all DatabaseIndex.fish)
       (.eq (.var nameIdent (.varchar 100)) (.str ⟨"Aal", by decide⟩))
   let x : PostgreSQL.M _ := do
     _ ← DBMonad.insert ins

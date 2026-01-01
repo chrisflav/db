@@ -64,4 +64,10 @@ instance (d : Database) : DBMonad d M where
   delete _ :=
     throw .fatal
 
+instance : DBMonadWithMigrations M where
+  init d :=
+    sorry
+  migrate {source target} migration :=
+    sorry
+
 end PostgreSQL

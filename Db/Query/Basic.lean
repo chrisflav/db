@@ -17,6 +17,36 @@ class Indexing (α : Type) : Type where
   fromString_toString (x : α) : FromString.fromString (ToString.toString x) = some x := by grind
 
 attribute [instance] Indexing.decidableEq Indexing.hashable Indexing.toString Indexing.fromString
+attribute [simp, grind] Indexing.fromString_toString
+
+structure IUnit (name : String) : Type where
+  deriving DecidableEq, Hashable
+
+instance (name : String) : Indexing (IUnit name) where
+  toString.toString _ := name
+  fromString.fromString s := if s == name then some ⟨⟩ else none
+  all := {⟨⟩}
+  fromString_toString := by simp
+
+class Disjoint (α β : Type) [Indexing α] [Indexing β] : Prop where
+  ne_toString (a : α) (b : β) : toString a ≠ toString b
+  fromString_eq_none_left (a : α) : (FromString.fromString (toString a) : Option β) = none
+  fromString_eq_none_right (b : β) : (FromString.fromString (toString b) : Option α) = none
+
+instance (α β : Type) [Indexing α] [Indexing β] [Disjoint α β] : Indexing (α ⊕ β) where
+  all := sorry
+  toString.toString := Sum.elim toString toString
+  fromString.fromString s :=
+    match (FromString.fromString s : Option α) with
+    | some x => some (.inl x)
+    | none => FromString.fromString s >>= fun b ↦ some (.inr b)
+  hashable.hash :=
+    -- this is probably bad?
+    Sum.elim hash hash
+  fromString_toString x := by
+    obtain (a | b) := x
+    · simp
+    · simp [Disjoint.fromString_eq_none_right]
 
 inductive DBType where
   | bool : DBType
@@ -50,6 +80,7 @@ instance : (t : DBType) → FromString t.Value
 
 structure Column where
   type : DBType
+  nullable : Bool
   deriving Repr, Hashable, DecidableEq
 
 structure Table where
@@ -58,6 +89,9 @@ structure Table where
   columns : Index → Column
 
 attribute [instance] Table.indexing
+
+structure Table.Entry (table : Table) : Type where
+  values (c : table.Index) : (table.columns c).type.Value
 
 structure Database where
   Index : Type
@@ -150,4 +184,4 @@ def signature {d : Database} (s : Std.HashSet d.Name) : Std.HashMap d.Name DBTyp
   s.inner.map (fun n _ ↦ n.dbtype)
 
 structure Database.Insert (d : Database) (tableName : d.Index) where
-  values (col : (d.tables tableName).Index) : ((d.tables tableName).columns col).type.Value
+  entry : (d.tables tableName).Entry
