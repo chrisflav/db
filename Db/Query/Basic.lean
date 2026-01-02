@@ -6,18 +6,17 @@ Authors: Christian Merten
 import Std
 import Db.Utils.VarChar
 import Db.Utils.FromString
+import Db.Utils.Enum
 
-class Indexing (α : Type) : Type where
-  [decidableEq : DecidableEq α]
-  [hashable : Hashable α]
+class Indexing (α : Type) : Type extends Enum α where
   [toString : ToString α]
   [fromString : FromString α]
   -- TODO: add axioms?
-  all (α) : Std.HashSet α
-  fromString_toString (x : α) : FromString.fromString (ToString.toString x) = some x := by grind
+  fromString_toString (x : α) : FromString.fromString (ToString.toString x) = some x := by
+    intro x; induction x <;> rfl
 
-attribute [instance] Indexing.decidableEq Indexing.hashable Indexing.toString Indexing.fromString
-attribute [simp, grind] Indexing.fromString_toString
+attribute [instance] Indexing.toString Indexing.fromString
+attribute [simp, grind .] Indexing.fromString_toString
 
 structure IUnit (name : String) : Type where
   deriving DecidableEq, Hashable
@@ -40,7 +39,7 @@ instance (α β : Type) [Indexing α] [Indexing β] [Disjoint α β] : Indexing 
     match (FromString.fromString s : Option α) with
     | some x => some (.inl x)
     | none => FromString.fromString s >>= fun b ↦ some (.inr b)
-  hashable.hash :=
+  hash :=
     -- this is probably bad?
     Sum.elim hash hash
   fromString_toString x := by
@@ -169,7 +168,7 @@ def Database.Name.toString {d : Database} : d.Name → String
 
 def Table.names {d : Database} (tname : d.Index) :
     Std.HashSet d.Name :=
-  .ofList ((Indexing.all (d.tables tname).Index).toList.map
+  .ofList ((Enum.all (d.tables tname).Index).toList.map
     fun i ↦ .ident ⟨tname, i, (d.tables tname).columns i, rfl⟩)
 
 -- TODO: add join operations

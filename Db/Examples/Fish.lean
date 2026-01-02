@@ -24,7 +24,6 @@ instance : FromString FishIndex where
 
 instance : Indexing FishIndex where
   all := {.name, .length}
-  fromString_toString x := by induction x <;> rfl
 
 abbrev fish : Table where
   Index := FishIndex
@@ -47,7 +46,6 @@ instance : FromString DatabaseIndex where
 
 instance : Indexing DatabaseIndex where
   all := {.fish}
-  fromString_toString x := by induction x <;> rfl
 
 abbrev database : Database where
   Index := DatabaseIndex
@@ -75,6 +73,45 @@ def ins2 : SQL.Insert :=
     { entry.values
         | .name => ⟨"Aal", by decide⟩
         | .length => 56 }
+
+example : String :=
+  SQL.Migration.CreateTable.toString (.fromTable fish "fish")
+
+inductive Fish2Index where
+  | name
+  | river
+  deriving DecidableEq, Hashable, Repr
+
+instance : ToString Fish2Index where
+  toString
+    | .name => "title"
+    | .river => "river"
+
+instance : FromString Fish2Index where
+  fromString
+    | "title" => some .name
+    | "river" => some .river
+    | _ => none
+
+instance : Indexing Fish2Index where
+  all := {.name, .river}
+
+def fish2 : Table where
+  Index := Fish2Index
+  columns
+    | .name =>
+      { type := .varchar 50
+        nullable := false }
+    | .river =>
+      { type := .bool
+        nullable := false }
+
+def fishToFish2 : FishIndex → Option Fish2Index
+  | .name => some .name
+  | .length => none
+
+def alterTable : SQL.Migration.AlterTable :=
+  .fromMap "fish" (source := fish) (target := fish2) fishToFish2
 
 structure Fish where
   name : VarChar 100

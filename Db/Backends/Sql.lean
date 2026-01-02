@@ -84,7 +84,7 @@ def Expr.ofValue {t : DBType} (x : t.Value) : Expr :=
 def Insert.fromInsert {d : Database} {tableName : d.Index} (ins : d.Insert tableName) : Insert where
   intoTable := ToString.toString tableName
   values :=
-    (Indexing.all (d.tables tableName).Index).toList.map
+    (Enum.all (d.tables tableName).Index).toList.map
       fun colName => ⟨ToString.toString colName, .ofValue (ins.entry.values colName)⟩
 
 def Insert.toString (ins : Insert) : String :=
@@ -122,7 +122,7 @@ structure CreateTable where
 
 def CreateTable.fromTable (table : Table) (name : String) : CreateTable where
   tableName := name
-  fields := (Indexing.all table.Index).toList.map
+  fields := (Enum.all table.Index).toList.map
     fun i ↦ .fromColumn (table.columns i) (toString i)
   -- TODO: fill placeholder implementation
   constraints := []
@@ -160,7 +160,7 @@ structure AlterTable where
 def AlterTable.toString (cmd : AlterTable) : String :=
   letI commands : List String := cmd.commands.map AlterTableCommand.toString
   s!"ALTER TABLE {cmd.tableName}
-    {"\n,".intercalate commands}
+    {",\n".intercalate commands}
   "
 
 def AlterTable.fromMap (tableName : String) {source target : Table}
@@ -170,16 +170,20 @@ def AlterTable.fromMap (tableName : String) {source target : Table}
   commands := Id.run <| do
     let mut ops := []
     let mut visited : Std.HashSet target.Index := .emptyWithCapacity
-    for index in Indexing.all source.Index do
+    for index in Enum.all source.Index do
       match map index with
       | some val =>
         visited := visited.insert val
-        if s!"{index}" != s!"{val}" then
-          ops := .renameColumn s!"{index}" s!"{val}" :: ops
         if source.columns index != target.columns val then
           ops := .alterColumn s!"{val}" (.setType <| DBType.toString (target.columns val).type) :: ops
+        if s!"{index}" != s!"{val}" then
+          ops := .renameColumn s!"{index}" s!"{val}" :: ops
       | none =>
         ops := .dropColumn s!"{index}" :: ops
+    for index in Enum.all target.Index do
+      if index ∈ visited then
+        continue
+      ops := .addColumn (.fromColumn (target.columns index) s!"{index}") :: ops
     return ops
 
 end Migration
