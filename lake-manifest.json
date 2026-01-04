@@ -1,5 +1,15 @@
 {"version": "1.1.0",
  "packagesDir": ".lake/packages",
- "packages": [],
+ "packages":
+ [{"url": "https://github.com/leanprover-community/quote4",
+   "type": "git",
+   "subDir": null,
+   "scope": "",
+   "rev": "523ec6fc8062d2f470fdc8de6f822fe89552b5e6",
+   "name": "quot4",
+   "manifestFile": "lake-manifest.json",
+   "inputRev": "v4.27.0-rc1",
+   "inherited": false,
+   "configFile": "lakefile.toml"}],
  "name": "db",
  "lakeDir": ".lake"}

@@ -5,9 +5,11 @@ Authors: Christian Merten
 -/
 import Db
 import Db.Examples.Fish
+import Db.Examples.Book
 import Db.Backends.PostgreSQL.Interpretation
 
-def main : IO Unit := do
+open FishExample in
+def testManual : IO Unit := do
   let nameIdent : database.Ident :=
     { tableName := .fish, columnName := .name, column := ⟨.varchar 100, false⟩ }
   let name : database.Name :=
@@ -35,3 +37,20 @@ def main : IO Unit := do
       let x : VarChar 100 := row.get! name
       let l : Int := row.get! length
       IO.println s!"Fish {x} has length {l}."
+
+open BookExample in
+def main : IO Unit := do
+  let mike : Author :=
+    { name := v"Mike"
+      age := 34
+      retired := false }
+  let q : QuerySet authorModel := Query.all authorModel.index
+  let x : PostgreSQL.M _ := do
+    authorModel.insert mike
+    q.fetch
+  let res ← PostgreSQL.runDB "postgresql://testuser:secret@localhost/testdb2" x
+  match res with
+  | .error _ => IO.println "Error occured."
+  | .ok authors =>
+    for author in authors do
+      IO.println s!"Fetched author {repr author}."

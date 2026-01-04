@@ -3,4 +3,4 @@ import Db.Interpretation.Basic
 import Db.Query.Basic
 import Db.Utils.VarChar
 import Db.Examples.Member
-import Db.Model.Meta
+import Db.Model

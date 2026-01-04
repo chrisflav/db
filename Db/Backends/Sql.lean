@@ -130,9 +130,9 @@ def CreateTable.fromTable (table : Table) (name : String) : CreateTable where
 def CreateTable.toString (cmd : CreateTable) : String :=
   letI fields : List String := cmd.fields.map FieldDef.toString
   letI constraints : List String := cmd.constraints.map ConstraintDef.toString
-  s!"CREATE TABLE {cmd.tableName}
-    {"\n,".intercalate fields}
-    {"\n,".intercalate constraints}
+  s!"CREATE TABLE {cmd.tableName} (
+    {",\n".intercalate fields}
+    {",\n".intercalate constraints}
   )"
 
 inductive AlterColumnCommand where

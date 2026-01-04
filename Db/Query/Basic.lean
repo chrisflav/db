@@ -8,15 +8,20 @@ import Db.Utils.VarChar
 import Db.Utils.FromString
 import Db.Utils.Enum
 
-class Indexing (α : Type) : Type extends Enum α where
+class Indexing (α : Type) : Type extends Enum α, Hashable α where
+  [decidableEq : DecidableEq α]
   [toString : ToString α]
   [fromString : FromString α]
-  -- TODO: add axioms?
   fromString_toString (x : α) : FromString.fromString (ToString.toString x) = some x := by
     intro x; induction x <;> rfl
 
-attribute [instance] Indexing.toString Indexing.fromString
+attribute [instance] Indexing.toString Indexing.fromString Indexing.decidableEq
 attribute [simp, grind .] Indexing.fromString_toString
+
+theorem Indexing.injective_toString {α : Type} [Indexing α] :
+    Function.Injective (ToString.toString (α := α)) := by
+  intro a b h
+  rw [← Option.some_inj, ← Indexing.fromString_toString, ← Indexing.fromString_toString, h]
 
 structure IUnit (name : String) : Type where
   deriving DecidableEq, Hashable
@@ -24,8 +29,12 @@ structure IUnit (name : String) : Type where
 instance (name : String) : Indexing (IUnit name) where
   toString.toString _ := name
   fromString.fromString s := if s == name then some ⟨⟩ else none
-  all := {⟨⟩}
   fromString_toString := by simp
+  length := 1
+  encoding.toFun _ := 0
+  encoding.invFun _ := ⟨⟩
+  encoding.invFun_toFun := by grind
+  encoding.toFun_invFun := by grind
 
 class Disjoint (α β : Type) [Indexing α] [Indexing β] : Prop where
   ne_toString (a : α) (b : β) : toString a ≠ toString b
@@ -33,7 +42,9 @@ class Disjoint (α β : Type) [Indexing α] [Indexing β] : Prop where
   fromString_eq_none_right (b : β) : (FromString.fromString (toString b) : Option α) = none
 
 instance (α β : Type) [Indexing α] [Indexing β] [Disjoint α β] : Indexing (α ⊕ β) where
-  all := sorry
+  length := Enum.length α + Enum.length β
+  encoding :=
+    (Equiv.sumCongr Enum.encoding Enum.encoding).trans finSumFinEquiv
   toString.toString := Sum.elim toString toString
   fromString.fromString s :=
     match (FromString.fromString s : Option α) with
@@ -89,6 +100,7 @@ structure Table where
 
 attribute [instance] Table.indexing
 
+@[ext]
 structure Table.Entry (table : Table) : Type where
   values (c : table.Index) : (table.columns c).type.Value
 

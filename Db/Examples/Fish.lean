@@ -6,10 +6,12 @@ Authors: Christian Merten
 import Init.Data.Function
 import Db
 
+namespace FishExample
+
 inductive FishIndex where
   | name
   | length
-  deriving DecidableEq, Hashable, Repr
+  deriving DecidableEq, Hashable, Repr, Enum
 
 instance : ToString FishIndex where
   toString
@@ -23,7 +25,6 @@ instance : FromString FishIndex where
     | _ => none
 
 instance : Indexing FishIndex where
-  all := {.name, .length}
 
 abbrev fish : Table where
   Index := FishIndex
@@ -33,7 +34,7 @@ abbrev fish : Table where
 
 inductive DatabaseIndex where
   | fish
-  deriving DecidableEq, Hashable, Repr
+  deriving DecidableEq, Hashable, Repr, Enum
 
 instance : ToString DatabaseIndex where
   toString
@@ -45,7 +46,6 @@ instance : FromString DatabaseIndex where
     | _ => none
 
 instance : Indexing DatabaseIndex where
-  all := {.fish}
 
 abbrev database : Database where
   Index := DatabaseIndex
@@ -80,7 +80,7 @@ example : String :=
 inductive Fish2Index where
   | name
   | river
-  deriving DecidableEq, Hashable, Repr
+  deriving DecidableEq, Hashable, Repr, Enum
 
 instance : ToString Fish2Index where
   toString
@@ -94,7 +94,6 @@ instance : FromString Fish2Index where
     | _ => none
 
 instance : Indexing Fish2Index where
-  all := {.name, .river}
 
 def fish2 : Table where
   Index := Fish2Index
@@ -148,3 +147,5 @@ structure Lake where
   name : VarChar 50
   fish : Many Fish
   owner : Key Person
+
+end FishExample

@@ -10,22 +10,15 @@ import Lean.Meta.Constructions.CtorIdx
 import Lean.Meta.Constructions.CasesOn
 import Db.Query.Basic
 import Db.Utils.Equiv
+import Db.Migration.Basic
+import Db.Model.HasTable
+import Db.Utils.FinCases
+
+universe u
 
 open Lean Elab Command
 
-def Lean.Expr.getForallArgs : Expr → List (Name × Expr)
-  | .forallE n t b _ => (n, t) :: getForallArgs b
-  | _ => []
-
 syntax (name := generateTableStx) "generate_table " ident : command
-
-def getStructureArgs {m : Type → Type} [Monad m] [MonadEnv m] [MonadError m] (decl : Name) :
-    m (List (Name × Expr)) := do
-  let .inductInfo info := ← getConstInfo decl | throwError "Not a structure."
-  unless info.ctors.length == 1 do throwError "Not a structure."
-  let ctor := info.ctors[0]!
-  let ctorInfo ← getConstInfo ctor
-  return ctorInfo.type.getForallArgs
 
 def mkEnumDeclaration (name : Name) (names : List Name) : Declaration :=
   Lean.mkInductiveDeclEs [] 0 [
@@ -34,11 +27,16 @@ def mkEnumDeclaration (name : Name) (names : List Name) : Declaration :=
       ctors := names.map fun arg ↦ { name := name ++ arg, type := .const name [] } }
   ] false
 
-def fromEnum (name : Name) (expr : Array Expr) (type : Expr) : MetaM Expr := do
-  let motive : Expr ← Meta.withLocalDecl `x BinderInfo.default (.const name []) fun x => do
-    Meta.mkLambdaFVars #[x] type
+def fromEnumWithoutMotive (name : Name) (expr : Array Expr) : MetaM Expr := do
   Meta.withLocalDecl `x BinderInfo.default (.const name []) fun x => do
-    let body ← Meta.mkAppOptM (name ++ `casesOn) (#[some motive, some x] ++ (expr.map Option.some))
+    let body ← Meta.mkAppOptM (name ++ `casesOn) (#[none, some x] ++ (expr.map Option.some))
+    Meta.mkLambdaFVars #[x] body
+
+def fromDepEnum (name : Name) (expr : Array (Expr × Expr)) : MetaM Expr := do
+  let motive : Expr ← fromEnum name (expr.map Prod.snd) (.sort 1)
+  Meta.withLocalDecl `x BinderInfo.default (.const name []) fun x => do
+    let body ← Meta.mkAppOptM (name ++ `casesOn)
+      (#[some motive, some x] ++ (expr.map (Option.some ∘ Prod.fst)))
     Meta.mkLambdaFVars #[x] body
 
 def FromString.ofToString (α : Type) [ToString α] [Enum α] : FromString α where
@@ -53,23 +51,26 @@ def List.toExpr (type : Expr) : List Expr → MetaM Expr
   | [] => Meta.mkAppOptM ``List.nil #[some type]
   | e :: es => do Meta.mkAppM ``List.cons #[e, ← es.toExpr type]
 
-def elabInstance (expr : Expr) : CommandElabM Unit := do
-  let instName : Name ← Lean.mkAuxDeclName
-  let instDecl : Declaration := .defnDecl
-    { name := instName
-      levelParams := []
-      type := ← liftTermElabM <| Meta.inferType expr
-      value := expr
-      hints := default
-      safety := .safe }
-  liftCoreM <| addAndCompile instDecl
-  liftTermElabM <| Meta.addInstance instName default 1000
-
+/--
+Produces roughly (where the list is `[(lhs1, rhs1), ...]`:
+```
+match var with
+| lhs1 => rhs1
+| lhs2 => rhs2
+| ...
+| _ => default
+```
+-/
 def mkMatch (var : Expr) (default : Expr) : List (Expr × Expr) → MetaM Expr
   | [] => pure default
   | (comp, val) :: xs => do
     Meta.mkAppM
       ``cond #[← Meta.mkAppM ``BEq.beq #[var, comp], val, ← mkMatch var default xs]
+
+open Qq
+
+def mkFinMatch (l : List Expr) (var : Q(Fin $(l).length)) : Expr :=
+  q($l[$var])
 
 def elabEnum (name : Name) (names : List (Name × String)) : CommandElabM Unit := do
   let decl : Declaration :=
@@ -80,21 +81,13 @@ def elabEnum (name : Name) (names : List (Name × String)) : CommandElabM Unit :
     mkCtorIdx name
   applyDerivingHandlers ``DecidableEq #[name]
   applyDerivingHandlers ``Hashable #[name]
+  applyDerivingHandlers ``Enum #[name]
   let toString : Expr ← liftTermElabM <| do
     let val : Expr ←
       fromEnum name (names.toArray.map fun x ↦ .lit <| .strVal x.2) (.const ``String [])
     Meta.mkAppM ``ToString.mk #[val]
   elabInstance toString
-  let enum : Expr ← liftTermElabM <| do
-    let arr : Expr ← Meta.mkAppM ``Array.mk
-      #[← (names.map fun x ↦ .const (name ++ x.1) []).toExpr (.const name [])]
-    let val : Expr ←
-      Meta.mkAppOptM ``Std.HashSet.ofArray
-        #[Expr.const name [], none, none, arr]
-    Meta.mkAppM ``Enum.mk #[val]
-  elabInstance enum
   let fromString : Expr ← liftTermElabM <| do
-    -- Meta.mkAppM ``FromString.ofToString #[.const name []]
     let val : Expr ←
       Meta.withLocalDecl `x BinderInfo.default (.const ``String []) fun x => do
         let body : Expr ← do
@@ -108,15 +101,13 @@ def elabEnum (name : Name) (names : List (Name × String)) : CommandElabM Unit :
   elabInstance fromString
   let indexing : Expr ← liftTermElabM <| do
     let app ← Meta.mkAppOptM ``Indexing.mk #[Expr.const name [],
-      none, none, none]
+      none, none, none, none, none]
     match (← Meta.inferType app).getForallArgs with
     | [(_name, type)] =>
       let e ← Meta.mkFreshExprMVar type
       _ ← Elab.runTactic e.mvarId! (← `(tactic| intro x; induction x <;> rfl))
       Meta.mkAppM' app #[e]
-    | vars =>
-      logInfo s!"{vars}"
-      return app
+    | _ => throwError "Failed when constructing indexing instance."
   elabInstance indexing
 
 class HasDBType (α : Type) where
@@ -134,6 +125,55 @@ instance (n : Nat) : HasDBType (VarChar n) where
 instance : HasDBType Int where
   dbType := .int
   encoding := Equiv.refl _
+
+/-- Add `HasTable` instance for `decl` with table `tableName`. -/
+def generateHasTable (decl indexName tableName : Name) : CommandElabM Unit := do
+  let fields ← getStructureArgs decl
+  let equiv : Expr ← liftTermElabM <| do
+    let entryType : Expr ← Meta.mkAppM ``Table.Entry #[.const tableName []]
+    let toFun : Expr ← Meta.withLocalDecl `x BinderInfo.default (.const decl []) fun x => do
+      let motive : Expr ←
+        Meta.withLocalDecl `x BinderInfo.default (.const indexName []) fun x => do
+          let body ← Meta.mkAppM ``DBType.Value #[
+            ← Meta.mkAppM
+              ``Column.type
+              #[← Meta.mkAppM ``Table.columns #[.const tableName [], x]]
+          ]
+          Meta.mkLambdaFVars #[x] body
+      let body : Expr ← do
+        Meta.mkAppOptM ``Table.Entry.mk #[
+          Expr.const tableName [],
+          ← fromEnumWithMotive indexName
+            (← (fields.toArray.mapM fun f => Meta.mkAppM (decl ++ f.1) #[x]))
+            motive
+        ]
+      Meta.mkLambdaFVars #[x] body
+    let invFun : Expr ← Meta.withLocalDecl `x BinderInfo.default entryType fun x => do
+      -- The values function of the entry
+      let valFun : Expr ← Meta.mkAppM ``Table.Entry.values #[x]
+      let body : Expr ← do
+        -- Construct term of structure
+        Meta.mkAppM (decl ++ `mk)
+          -- for every field of the structure
+          (← fields.toArray.mapM
+            fun f => do pure <|
+            -- evaluate the values function
+            ← Meta.mkAppM' valFun #[← Meta.mkAppM (indexName ++ f.1) #[]])
+      Meta.mkLambdaFVars #[x] body
+    let appEquiv ← Meta.mkAppOptM ``Equiv.mk #[Expr.const decl [], entryType, toFun, invFun]
+    match (← Meta.inferType appEquiv).getForallArgs with
+    | [(_name₁, type₁), (_name₂, type₂)] =>
+      let e₁ ← Meta.mkFreshExprMVar type₁
+      _ ← Elab.runTactic e₁.mvarId!
+        (← `(tactic| intro x; induction x <;> rfl))
+      let e₂ ← Meta.mkFreshExprMVar type₂
+      _ ← Elab.runTactic e₂.mvarId!
+        (← `(tactic| intro x; induction x <;> ext y <;> induction y <;> rfl))
+      Meta.mkAppM' appEquiv #[e₁, e₂]
+    | _ => throwError "Failed when constructing `HasTable`."
+  let inst : Expr ← liftTermElabM <|
+    Meta.mkAppOptM ``HasTable.mk #[none, Expr.const tableName [], equiv]
+  elabInstance inst
 
 /-- Generate a `Table` for structure named `decl`. -/
 def generateTable (decl : Name) : CommandElabM Unit := do
@@ -162,6 +202,7 @@ def generateTable (decl : Name) : CommandElabM Unit := do
         hints := default
         safety := .safe }
   liftCoreM <| addAndCompile tableDecl
+  generateHasTable decl indexName tableName
 
 @[command_elab generateTableStx]
 def generateTableElab : CommandElab
@@ -179,5 +220,6 @@ generate_table Baz
 
 example : (BazTable.columns .val).type = .bool := rfl
 example : (BazTable.columns .val2).type = .int := rfl
+example : Enum.encoding.invFun 0 = BazIndex.val := rfl
 
 end Example

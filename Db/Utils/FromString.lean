@@ -10,9 +10,11 @@ instance : FromString Nat where
 instance : FromString Bool where
   fromString
     | "true" => some true
+    | "True" => some true
     | "false" => some false
     | "False" => some false
-    | "Talse" => some true
+    | "t" => some true
+    | "f" => some false
     | "1" => some true
     | "0" => some false
     | _ => none

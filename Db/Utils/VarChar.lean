@@ -9,6 +9,7 @@ import Db.Utils.FromString
 structure VarChar (n : Nat) where
   val : String
   length_le : val.length ≤ n := by decide
+  deriving Repr
 
 instance {n : Nat} (x : VarChar n) : CoeDep (VarChar n) x String where
   coe := x.val

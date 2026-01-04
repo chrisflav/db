@@ -31,4 +31,6 @@ lean_lib Db.Backends.PostgreSQL.FFI where
   precompileModules := true
   moreLinkObjs := #[libleanffi_postgresql]
 
+require quot4 from git "https://github.com/leanprover-community/quote4" @ "v4.27.0-rc1"
+
 @[default_target] lean_exe db where root := `Main

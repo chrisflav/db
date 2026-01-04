@@ -8,6 +8,7 @@ import Db.Migration.Basic
 structure Interpretation (query : Type) where
   fromQuery {d : Database} (names : Std.HashSet d.Name) (q : Query d names) : query
 
+-- TODO: Should also support logging operations for a custom error type
 /-- An interpretation monad on the database `d` provides lookup and modification operations. -/
 class DBMonad (d : Database) (m : Type → Type) where
   /-- Lookup the given query on the database. -/
@@ -20,9 +21,11 @@ class DBMonad (d : Database) (m : Type → Type) where
 
 class DBMonadWithMigrations (m : Type → Type) where
   [dbMonad (d : Database) : DBMonad d m]
-  /-- Initialize with given database description. -/
-  init (d : Database) : m Unit
+  /- Initialize with given database description. -/
+  -- init (d : Database) : m Unit
   -- this does not work because `Database : Type 1`
   -- currentDatabase : m Database
-  /-- Execute the given migration. -/
-  migrate {source target : Database} (migration : source.Migration target) : m Unit
+  /- Execute the given migration. -/
+  -- migrate {source target : Database} (migration : source.Migration target) : m Unit
+  -- TODO: Replace this with a proper implementation.
+  createTable (name : String) (table : Table) : m Unit

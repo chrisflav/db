@@ -65,9 +65,9 @@ instance (d : Database) : DBMonad d M where
     throw .fatal
 
 instance : DBMonadWithMigrations M where
-  init d :=
-    sorry
-  migrate {source target} migration :=
-    sorry
+  createTable name table := do
+    let conn := (← get).connection
+    let sql : SQL.Migration.CreateTable := .fromTable table name
+    _ ← conn.exec sql.toString
 
 end PostgreSQL
