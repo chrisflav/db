@@ -4,6 +4,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Christian Merten
 -/
 import Db.Query.Basic
+import Db.Utils.MatchMap
 
 universe t u
 
@@ -51,7 +52,7 @@ causes universe issues with monads.
 -/
 structure TableRecipe : Type where
   columns : Std.HashMap String Column
-  deriving Repr
+  deriving Repr, BEq
 
 /--
 The minimal data required for defining a database. This is less convenient to work with, because
@@ -80,3 +81,49 @@ def DatabaseRecipe.table (recipe : DatabaseRecipe) : Database where
   Index := recipe.Index
   tables (i : Fin _) :=
     recipe.tables[recipe.tables.keys[i]]'(by grind) |>.table
+
+def Table.recipe (table : Table) : TableRecipe where
+  columns := .ofArray <|
+    (Enum.all table.Index).map fun idx => (toString idx, table.columns idx)
+
+def Database.recipe (database : Database) : DatabaseRecipe where
+  tables := .ofArray <|
+    (Enum.all database.Index).map fun idx => (toString idx, database.tables idx |>.recipe)
+
+-- maybe better for computations?
+structure Recipe : Type where
+  columns : Std.HashMap (String × String) Column
+  deriving Repr
+
+@[grind]
+def TableRecipe.names (recipe : TableRecipe) : Std.HashSet String :=
+  .mk <| recipe.columns.map fun _ _ => ()
+
+abbrev ColumnOperation : Column → Type :=
+  fun _ => Column
+
+instance : HasOperations Column ColumnOperation where
+  execute _ op := op
+  operations _ target := #[target]
+
+abbrev TableOperation (table : TableRecipe) : Type :=
+  table.columns.Operation ColumnOperation
+
+instance : HasOperations TableRecipe TableOperation where
+  execute recipe op := { columns := HasOperations.execute recipe.columns op }
+  operations source target := HasOperations.operations source.columns target.columns
+
+abbrev DatabaseOperation (database : DatabaseRecipe) : Type :=
+  database.tables.Operation TableOperation
+
+instance : HasOperations DatabaseRecipe DatabaseOperation where
+  execute recipe op := { tables := HasOperations.execute recipe.tables op }
+  operations source target := HasOperations.operations source.tables target.tables
+
+def TableRecipe.operations (source target : TableRecipe) :
+    Array (TableOperation source) :=
+  HasOperations.operations source target
+
+def DatabaseRecipe.operations (source target : DatabaseRecipe) :
+    Array (DatabaseOperation source) :=
+  HasOperations.operations source target

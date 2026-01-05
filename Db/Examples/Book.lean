@@ -49,8 +49,8 @@ def test : IO Unit := do
   let q : QuerySet authorModel := Query.all authorModel.index
   let x : PostgreSQL.M _ := do
     let d ← DBMonadWithMigrations.currentDatabase
-    IO.println s!"Current database: {repr d}"
-    -- authorModel.insert mike
+    for op in d.operations database.recipe do
+      IO.println (repr op)
     q.fetch
   let res ← PostgreSQL.runDB "postgresql://testuser:secret@localhost/testdb2" x
   match res with

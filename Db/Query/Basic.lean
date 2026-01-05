@@ -93,8 +93,9 @@ structure Column where
   nullable : Bool
   deriving Repr, Hashable, DecidableEq
 
-abbrev Column.Value (col : Column) : Type :=
-  if col.nullable then Option col.type.Value else col.type.Value
+abbrev Column.Value : Column → Type
+  | { type := type, nullable := false } => type.Value
+  | { type := type, nullable := true } => Option type.Value
 
 instance : (col : Column) → FromString col.Value
   | { type := type, nullable := false } => inferInstanceAs (FromString type.Value)
@@ -105,6 +106,10 @@ instance : (col : Column) → FromString col.Value
         | s => do
           let val : type.Value ← FromString.fromString s
           return (some val) }
+
+instance : (col : Column) → Inhabited col.Value
+  | { type := _, nullable := false } => inferInstance
+  | { type := _, nullable := true } => inferInstance
 
 example : (Column.mk .int false).Value = Int := rfl
 

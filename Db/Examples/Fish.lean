@@ -71,7 +71,7 @@ def ins2 : SQL.Insert :=
   SQL.Insert.fromInsert (d := database) (tableName := .fish)
     { entry.values
         | .name => ⟨"Aal", by decide⟩
-        | .length => (56 : Int) }
+        | .length => 56 }
 
 example : String :=
   SQL.Migration.CreateTable.toString (.fromTable fish "fish")
@@ -159,7 +159,7 @@ def test : IO Unit := do
   let ins : database.Insert .fish :=
     { entry.values
         | .name => ⟨"Aal", by decide⟩
-        | .length => (56 : Int) }
+        | .length => 56 }
   let q : Query database _ :=
     .filter
       (.all DatabaseIndex.fish)
@@ -171,12 +171,10 @@ def test : IO Unit := do
   match res with
   | .error _ => IO.println "Error occured."
   | .ok val =>
-    /-
     for row in val do
       let x : VarChar 100 := row.get! name
       let l : Int := row.get! length
       IO.println s!"Fish {x} has length {l}."
-    -/
     pure ()
 
 end FishExample

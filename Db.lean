@@ -3,4 +3,6 @@ import Db.Backends.PostgreSQL.Interpretation
 import Db.Interpretation.Basic
 import Db.Query.Basic
 import Db.Utils.VarChar
+import Db.Migration.Basic
+import Db.Migration.Recipe
 import Db.Model

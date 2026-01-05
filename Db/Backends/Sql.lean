@@ -108,13 +108,16 @@ namespace Migration
 structure FieldDef where
   name : String
   type : String
+  nullable : Bool
 
 def FieldDef.toString (fieldDef : FieldDef) : String :=
-  s!"{fieldDef.name}  {fieldDef.type}"
+  s!"{fieldDef.name}  {fieldDef.type}{if not fieldDef.nullable then "NOT NULL" else ""}"
 
 def FieldDef.fromColumn (column : Column) (name : String) : FieldDef where
   name := name
   type := DBType.toString column.type
+  -- TODO: Technically, this is a constraint. Move to constraints?
+  nullable := column.nullable
 
 -- TODO: fill placeholder implementation
 structure ConstraintDef where
