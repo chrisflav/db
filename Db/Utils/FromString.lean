@@ -1,4 +1,6 @@
-class FromString (α : Type) where
+universe u
+
+class FromString (α : Type u) where
   fromString : String → Option α
 
 instance : FromString Int where
@@ -17,4 +19,9 @@ instance : FromString Bool where
     | "f" => some false
     | "1" => some true
     | "0" => some false
+    | "YES" => some true
+    | "NO" => some false
     | _ => none
+
+instance : FromString String where
+  fromString := some

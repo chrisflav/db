@@ -35,8 +35,9 @@ structure ResultData : Type where
 inductive ResultError where
   | emptyQuery
   | badResponse
-  | fatal
-  | nonfatal
+  | fatal (msg : String)
+  | nonfatal (msg : String)
+  deriving Repr
 
 inductive Result where
   | success
@@ -49,10 +50,13 @@ def Connection.exec (conn : Connection) (query : String) : IO Result := do
   match res.status with
   | .TUPLES_OK => return .data { raw := res }
   | .COMMAND_OK => return .success
-  | .NONFATAL_ERROR => return .failure .nonfatal
+  | .NONFATAL_ERROR msg => return .failure (.nonfatal msg)
+  | .FATAL_ERROR msg => return .failure (.fatal msg)
   | .EMPTY_QUERY => return .failure .emptyQuery
   | .BAD_RESPONSE => return .failure .badResponse
-  | _ => return .failure .fatal
+  | status =>
+    IO.println s!"{repr status}"
+    return .failure (.fatal "No error message.")
 
 /-- The number of returned rows of a result data. -/
 def ResultData.nrows (data : ResultData) : Nat :=

@@ -93,6 +93,11 @@ extern "C" lean_obj_res c_PQresultStatus(lean_obj_arg result_) {
     return lean_mk_string(status);
 }
 
+extern "C" lean_obj_res c_PQresultErrorMessage(lean_obj_arg result_) {
+    char* status = PQresultErrorMessage(unbox_PGresult(result_));
+    return lean_mk_string(status);
+}
+
 extern "C" uint32_t c_PQntuples(lean_obj_arg result_) {
     return PQntuples(unbox_PGresult(result_));
 }

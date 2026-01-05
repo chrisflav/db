@@ -111,20 +111,34 @@ def elabEnum (name : Name) (names : List (Name × String)) : CommandElabM Unit :
   elabInstance indexing
 
 class HasDBType (α : Type) where
-  dbType : DBType
-  encoding : α ≃ dbType.Value
+  type : DBType
+  encoding : α ≃ type.Value
+
+class HasColumn (α : Type) where
+  column : Column
+  encoding : α ≃ column.Value
 
 instance : HasDBType Bool where
-  dbType := .bool
+  type := .bool
   encoding := Equiv.refl _
 
 instance (n : Nat) : HasDBType (VarChar n) where
-  dbType := .varchar n
+  type := .varchar n
   encoding := Equiv.refl _
 
 instance : HasDBType Int where
-  dbType := .int
+  type := .int
   encoding := Equiv.refl _
+
+instance (α : Type) [HasDBType α] : HasColumn α where
+  column.type := HasDBType.type α
+  column.nullable := false
+  encoding := HasDBType.encoding
+
+instance (α : Type) [HasDBType α] : HasColumn (Option α) where
+  column.type := HasDBType.type α
+  column.nullable := true
+  encoding := HasDBType.encoding.optionCongr
 
 /-- Add `HasTable` instance for `decl` with table `tableName`. -/
 def generateHasTable (decl indexName tableName : Name) : CommandElabM Unit := do
@@ -134,10 +148,8 @@ def generateHasTable (decl indexName tableName : Name) : CommandElabM Unit := do
     let toFun : Expr ← Meta.withLocalDecl `x BinderInfo.default (.const decl []) fun x => do
       let motive : Expr ←
         Meta.withLocalDecl `x BinderInfo.default (.const indexName []) fun x => do
-          let body ← Meta.mkAppM ``DBType.Value #[
-            ← Meta.mkAppM
-              ``Column.type
-              #[← Meta.mkAppM ``Table.columns #[.const tableName [], x]]
+          let body ← Meta.mkAppM ``Column.Value #[
+            ← Meta.mkAppM ``Table.columns #[.const tableName [], x]
           ]
           Meta.mkLambdaFVars #[x] body
       let body : Expr ← do
@@ -185,9 +197,7 @@ def generateTable (decl : Name) : CommandElabM Unit := do
   -- Construct `Index → Column`
   let cols : Array Expr ← liftTermElabM <|
     names.toArray.mapM fun (_, type) ↦ do
-      let dbtype : Expr ← Meta.mkAppOptM ``HasDBType.dbType #[some type, none]
-      Meta.mkAppM ``Column.mk
-        #[dbtype, .const ``Bool.false []]
+      Meta.mkAppOptM ``HasColumn.column #[some type, none]
   let colMap : Expr ←
     liftTermElabM <| fromEnum indexName cols (.const ``Column [])
   -- Construct `Table` and add to environment

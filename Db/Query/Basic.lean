@@ -93,6 +93,21 @@ structure Column where
   nullable : Bool
   deriving Repr, Hashable, DecidableEq
 
+abbrev Column.Value (col : Column) : Type :=
+  if col.nullable then Option col.type.Value else col.type.Value
+
+instance : (col : Column) → FromString col.Value
+  | { type := type, nullable := false } => inferInstanceAs (FromString type.Value)
+  | { type := type, nullable := true } =>
+    { fromString
+        | "" => some none
+        | "NULL" => some none
+        | s => do
+          let val : type.Value ← FromString.fromString s
+          return (some val) }
+
+example : (Column.mk .int false).Value = Int := rfl
+
 structure Table where
   Index : Type
   [indexing : Indexing Index]
@@ -102,7 +117,7 @@ attribute [instance] Table.indexing
 
 @[ext]
 structure Table.Entry (table : Table) : Type where
-  values (c : table.Index) : (table.columns c).type.Value
+  values (c : table.Index) : (table.columns c).Value
 
 structure Database where
   Index : Type
@@ -169,6 +184,12 @@ inductive Database.Name (d : Database) where
   | ident (i : d.Ident) : Name d
   | computation (n : String) (t : DBType) : Name d
   deriving DecidableEq, Hashable
+
+def Database.Name.column {d : Database} : d.Name → Column
+  | .ident i => i.column
+  | .computation _ t =>
+    { type := t
+      nullable := false }
 
 def Database.Name.dbtype {d : Database} : d.Name → DBType
   | .ident i => i.dbtype

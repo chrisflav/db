@@ -7,6 +7,7 @@ import Db.Backends.PostgreSQL.Basic
 import Db.Utils.FromString
 import Db.Backends.Sql
 import Db.Interpretation.Basic
+import Db.Model
 
 def Database.resolveName (d : Database) (tableName columnName : String) : Option d.Name :=
   match (FromString.fromString tableName : Option d.Index) with
@@ -19,7 +20,9 @@ def Database.resolveName (d : Database) (tableName columnName : String) : Option
 namespace PostgreSQL
 
 inductive Exception where
+  | connectionError
   | fatal
+  deriving Repr
 
 structure State where
   /-- The connection info for the connection. Needed to reconnect. -/
@@ -35,7 +38,7 @@ def runDB (connectionInfo : String) {α : Type} (x : M α) : IO (Except Exceptio
   let conn ← connect connectionInfo
   match conn with
   | some conn => x.run { connectionInfo := connectionInfo, connection := conn }
-  | none => return .error .fatal
+  | none => return .error .connectionError
 
 instance (d : Database) : DBMonad d M where
   lookup {names} q := do
@@ -50,12 +53,15 @@ instance (d : Database) : DBMonad d M where
             if h : name.toString ∈ row then do
               let x := row[name.toString]
               match (FromString.fromString row[name.toString] :
-                  Option name.dbtype.Value) with
+                  Option name.column.Value) with
               | some val => map := map.insert name val
               | none => pure ()
             else
               pure ()
           return map
+    | .failure e => do
+      IO.println s!"{repr e}"
+      throw .fatal
     | _ => throw .fatal
   insert {table} data := do
     let conn := (← get).connection
@@ -64,10 +70,69 @@ instance (d : Database) : DBMonad d M where
   delete _ :=
     throw .fatal
 
+structure InformationSchema where
+  table_name : VarChar 100
+  column_name : VarChar 100
+  is_nullable : Bool
+  data_type : VarChar 100
+  -- TODO: add `DBType.nat` and change this to `Nat`
+  character_maximum_length : Option Int
+  deriving Repr
+
+def InformationSchema.column (info : InformationSchema) : Option Column := do
+  let dbtype : DBType ← do
+    match info.data_type.val with
+    | "integer" => pure DBType.int
+    | "boolean" => pure DBType.bool
+    | "character varying" => pure <| DBType.varchar (← info.character_maximum_length).toNat
+    | _ => none
+  pure
+    { type := dbtype
+      nullable := info.is_nullable }
+
+generate_table PostgreSQL.InformationSchema
+
+inductive CatalogIndex : Type
+  | information_schema
+  deriving Hashable, DecidableEq, Repr, Enum
+
+instance : ToString CatalogIndex where
+  toString
+    | .information_schema => "information_schema.columns"
+
+instance : FromString CatalogIndex where
+  fromString
+    | "information_schema.columns" => some .information_schema
+    | _ => none
+
+instance : Indexing CatalogIndex where
+
+abbrev catalog : Database where
+  Index := CatalogIndex
+  tables
+    | .information_schema => InformationSchemaTable
+
+def InformationSchema.model : Model catalog InformationSchema where
+  index := .information_schema
+
 instance : DBMonadWithMigrations M where
   createTable name table := do
     let conn := (← get).connection
     let sql : SQL.Migration.CreateTable := .fromTable table name
     _ ← conn.exec sql.toString
+  currentDatabase := do
+    let q : QuerySet InformationSchema.model := .all _
+    let infos ← q.fetch
+    let mut tables := .emptyWithCapacity
+    for info in infos do
+      if let some col := info.column then
+      let table ← do
+        if h : info.table_name.val ∈ tables then
+          pure <| tables[info.table_name.val].columns.insert
+            info.column_name.val col
+        else
+          pure <| { (info.column_name.val, col) }
+      tables := tables.insert info.table_name.val { columns := table }
+    return { tables := tables }
 
 end PostgreSQL

@@ -41,4 +41,22 @@ instance : HasTable Author (database.tables .author) :=
 def authorModel : Model database Author where
   index := .author
 
+def test : IO Unit := do
+  let mike : Author :=
+    { name := v"Mike"
+      age := 34
+      retired := false }
+  let q : QuerySet authorModel := Query.all authorModel.index
+  let x : PostgreSQL.M _ := do
+    let d ← DBMonadWithMigrations.currentDatabase
+    IO.println s!"Current database: {repr d}"
+    -- authorModel.insert mike
+    q.fetch
+  let res ← PostgreSQL.runDB "postgresql://testuser:secret@localhost/testdb2" x
+  match res with
+  | .error e => IO.println s!"Error occured: {repr e}."
+  | .ok authors =>
+    for author in authors do
+      IO.println s!"Fetched author {repr author}."
+
 end BookExample

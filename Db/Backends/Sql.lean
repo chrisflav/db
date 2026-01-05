@@ -16,6 +16,7 @@ inductive Expr where
   | var (table column : String)
   | str (s : String)
   | int (n : Int)
+  | null
   deriving Repr
 
 def Expr.toString : Expr → String
@@ -26,6 +27,7 @@ def Expr.toString : Expr → String
   | .var table column => s!"{table}.{column}"
   | .str s => s!"'{s}'"
   | .int n => ToString.toString n
+  | .null => "NULL"
 
 def Expr.fromExpr {d : Database} {t : DBType} : DBExpr d t → Expr
   | .true => true
@@ -75,11 +77,17 @@ structure Insert where
   intoTable : String
   values : List (String × Expr)
 
-def Expr.ofValue {t : DBType} (x : t.Value) : Expr :=
+def Expr.ofDBTypeValue {t : DBType} (x : t.Value) : Expr :=
   match t with
   | .int => .int x
   | .varchar _ => .str x
   | .bool => if x then .true else .false
+
+def Expr.ofValue {c : Column} (x : c.Value) : Expr :=
+  match c, x with
+  | { type := _, nullable := .false }, x => .ofDBTypeValue x
+  | { type := _, nullable := .true }, some x => .ofDBTypeValue x
+  | { type := _, nullable := .true }, none => .null
 
 def Insert.fromInsert {d : Database} {tableName : d.Index} (ins : d.Insert tableName) : Insert where
   intoTable := ToString.toString tableName

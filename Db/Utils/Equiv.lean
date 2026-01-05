@@ -42,3 +42,10 @@ def finSumFinEquiv {m n : Nat} :
   toFun := Sum.elim (Fin.castAdd n) (Fin.natAdd m)
   invFun i := @Fin.addCases m n (fun _ => Fin m ⊕ Fin n) Sum.inl Sum.inr i
   toFun_invFun i := by induction i using Fin.addCases <;> simp
+
+def Equiv.optionCongr {α : Type u₁} {β : Type u₂} (e : α ≃ β) :
+    (Option α) ≃ (Option β) where
+  toFun := Option.map e.toFun
+  invFun := Option.map e.invFun
+  invFun_toFun a := by induction a <;> grind
+  toFun_invFun b := by induction b <;> grind

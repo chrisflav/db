@@ -1,3 +1,8 @@
+/-
+Copyright (c) 2025 Christian Merten. All rights reserved.
+Released under Apache 2.0 license as described in the file LICENSE.
+Authors: Christian Merten
+-/
 import Db.Query.Basic
 import Db.Utils.Equiv
 
@@ -39,7 +44,6 @@ instance (α β : Type) [Indexing α] [Indexing β] : Subsingleton (Indexing.Equ
     apply Indexing.injective_toString
     simp
 
--- TODO: this is currently wrong, because we ask nothing for `Enum.all`
 theorem Indexing.Equiv.nonempty_iff :
     Nonempty (Indexing.Equiv α β) ↔
       ((Enum.all α).toList.map ToString.toString).Perm

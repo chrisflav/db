@@ -3,7 +3,6 @@ Copyright (c) 2025 Christian Merten. All rights reserved.
 Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Christian Merten
 -/
-import Init.Data.Function
 import Db
 
 namespace FishExample
@@ -72,7 +71,7 @@ def ins2 : SQL.Insert :=
   SQL.Insert.fromInsert (d := database) (tableName := .fish)
     { entry.values
         | .name => ⟨"Aal", by decide⟩
-        | .length => 56 }
+        | .length => (56 : Int) }
 
 example : String :=
   SQL.Migration.CreateTable.toString (.fromTable fish "fish")
@@ -147,5 +146,37 @@ structure Lake where
   name : VarChar 50
   fish : Many Fish
   owner : Key Person
+
+def test : IO Unit := do
+  let nameIdent : database.Ident :=
+    { tableName := .fish, columnName := .name, column := ⟨.varchar 100, false⟩ }
+  let name : database.Name :=
+    .ident { tableName := .fish, columnName := .name, column := ⟨.varchar 100, false⟩ }
+  let lengthIdent : database.Ident :=
+    { tableName := .fish, columnName := .length, column := ⟨.int, false⟩ }
+  let length : database.Name :=
+    .ident lengthIdent
+  let ins : database.Insert .fish :=
+    { entry.values
+        | .name => ⟨"Aal", by decide⟩
+        | .length => (56 : Int) }
+  let q : Query database _ :=
+    .filter
+      (.all DatabaseIndex.fish)
+      (.eq (.var nameIdent (.varchar 100)) (.str ⟨"Aal", by decide⟩))
+  let x : PostgreSQL.M _ := do
+    _ ← DBMonad.insert ins
+    DBMonad.lookup q
+  let res ← PostgreSQL.runDB "postgresql://testuser:secret@localhost/testdb2" x
+  match res with
+  | .error _ => IO.println "Error occured."
+  | .ok val =>
+    /-
+    for row in val do
+      let x : VarChar 100 := row.get! name
+      let l : Int := row.get! length
+      IO.println s!"Fish {x} has length {l}."
+    -/
+    pure ()
 
 end FishExample

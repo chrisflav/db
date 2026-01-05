@@ -19,8 +19,8 @@ inductive ResultStatus where
   | COPY_IN
   | COPY_BOTH
   | BAD_RESPONSE
-  | NONFATAL_ERROR
-  | FATAL_ERROR
+  | NONFATAL_ERROR (msg : String)
+  | FATAL_ERROR (msg : String)
   | PIPELINE_SYNC
   | PIPELINE_ABORTED
   deriving Repr
@@ -45,12 +45,15 @@ opaque Connection.exec (m : Connection) (query : String) : IO Result
 @[extern "c_PQresultStatus"]
 opaque Result.statusAsString (res : Result) : String
 
+@[extern "c_PQresultErrorMessage"]
+opaque Result.errorMessage (res : Result) : String
+
 /-- Return the status of a result in terms of `ResultStatus`. -/
 def Result.status (res : Result) : ResultStatus :=
   match res.statusAsString with
   | "PGRES_TUPLES_OK" => .TUPLES_OK
   | "PGRES_COMMAND_OK" => .COMMAND_OK
-  | _ => .FATAL_ERROR
+  | _ => .FATAL_ERROR res.errorMessage
 
 @[extern "c_PQntuples"]
 opaque Result.ntuples (res : Result) : UInt32
