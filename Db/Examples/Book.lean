@@ -41,6 +41,33 @@ instance : HasTable Author (database.tables .author) :=
 def authorModel : Model database Author where
   index := .author
 
+section Migrations
+
+def filePath : System.FilePath :=
+  "migrations" / "book"
+
+abbrev initial : Array DatabaseOperation :=
+  #[.insert "author"
+    { columns := .ofArray #[
+        ("age21", { type := .int, nullable := false })
+      ]
+    }
+  ]
+
+abbrev initial.result : DatabaseRecipe :=
+  HasExecution.execute ∅ initial[0] <| by grind
+
+abbrev mig1 : Array DatabaseOperation :=
+  #[.alter "author"
+    (.alter "age" { type := .int, nullable := false })
+  ]
+
+-- TODO: add (grind) API to prove certain operations preserve validity
+def mig1.result : DatabaseRecipe :=
+  HasExecution.execute initial.result mig1[0] sorry
+
+end Migrations
+
 def test : IO Unit := do
   let mike : Author :=
     { name := v"Mike"

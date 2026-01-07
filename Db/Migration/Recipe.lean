@@ -90,6 +90,12 @@ def Database.recipe (database : Database) : DatabaseRecipe where
   tables := .ofArray <|
     (Enum.all database.Index).map fun idx => (toString idx, database.tables idx |>.recipe)
 
+instance : EmptyCollection DatabaseRecipe where
+  emptyCollection := { tables := ∅ }
+
+@[simp, grind =]
+theorem DatabaseRecipe.tables_empty : (∅ : DatabaseRecipe).tables = ∅ := rfl
+
 -- maybe better for computations?
 structure Recipe : Type where
   columns : Std.HashMap (String × String) Column
@@ -99,31 +105,46 @@ structure Recipe : Type where
 def TableRecipe.names (recipe : TableRecipe) : Std.HashSet String :=
   .mk <| recipe.columns.map fun _ _ => ()
 
-abbrev ColumnOperation : Column → Type :=
-  fun _ => Column
+abbrev ColumnOperation : Type :=
+  Column
 
 instance : HasOperations Column ColumnOperation where
-  execute _ op := op
+  isValid _ _ := true
+  execute _ op _ := op
   operations _ target := #[target]
 
-abbrev TableOperation (table : TableRecipe) : Type :=
-  table.columns.Operation ColumnOperation
+abbrev TableOperation : Type :=
+  Std.HashMap.Operation String Column ColumnOperation
 
+@[grind]
 instance : HasOperations TableRecipe TableOperation where
-  execute recipe op := { columns := HasOperations.execute recipe.columns op }
+  isValid table op :=
+    HasExecution.isValid table.columns op
+  execute recipe op valid :=
+    { columns := HasExecution.execute recipe.columns op valid }
   operations source target := HasOperations.operations source.columns target.columns
 
-abbrev DatabaseOperation (database : DatabaseRecipe) : Type :=
-  database.tables.Operation TableOperation
+abbrev DatabaseOperation : Type :=
+  Std.HashMap.Operation String TableRecipe TableOperation
 
+@[grind]
 instance : HasOperations DatabaseRecipe DatabaseOperation where
-  execute recipe op := { tables := HasOperations.execute recipe.tables op }
+  isValid database op :=
+    HasExecution.isValid database.tables op
+  execute recipe op valid :=
+    { tables := HasExecution.execute recipe.tables op valid }
   operations source target := HasOperations.operations source.tables target.tables
 
+
+@[simp, grind =]
+theorem DatabaseOperation.isValid_iff (d : DatabaseRecipe) (op : DatabaseOperation) :
+    HasExecution.isValid d op = op.isValid d.tables :=
+  rfl
+
 def TableRecipe.operations (source target : TableRecipe) :
-    Array (TableOperation source) :=
+    Array TableOperation :=
   HasOperations.operations source target
 
 def DatabaseRecipe.operations (source target : DatabaseRecipe) :
-    Array (DatabaseOperation source) :=
+    Array DatabaseOperation :=
   HasOperations.operations source target

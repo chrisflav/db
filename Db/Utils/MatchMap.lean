@@ -7,40 +7,66 @@ import Std
 
 universe v t u
 
-variable {k : Type t} {α : Type t} [BEq k] [Hashable k] [LawfulBEq k]
+variable {k : Type t} {α : Type t} [BEq k] [Hashable k]
 
-class HasOperations (α : Type u) (op : α → Type t) where
-  execute (init : α) (operation : op init) : α
-  operations (source target : α) : Array (op source)
+class HasExecution (α : Type u) (op : Type t) where
+  isValid : α → op → Bool
+  execute (init : α) (operation : op) : isValid init operation → α
 
+class HasOperations (α : Type u) (op : Type t) extends HasExecution α op where
+  operations (source target : α) : Array op
+
+variable (k α) in
 /-- An operation on a `HashMap`. -/
-inductive Std.HashMap.Operation (op : α → Type v) [∀ a, Repr (op a)] (m : Std.HashMap k α) where
+inductive Std.HashMap.Operation (op : Type v) where
   /-- Insert a new entry with a not yet existing key. -/
-  | insert (new : k) (value : α) (notMem : new ∉ m := by grind)
+  | insert (new : k) (value : α)
   /-- Remove an existing entry. -/
-  | remove (key : k) (mem : key ∈ m := by grind)
+  | remove (key : k)
   /-- Replace the value of an existing entry. -/
-  | alter (key : k) (mem : key ∈ m := by grind) (operation : op m[key])
+  | alter (key : k) (operation : op)
   /-- Rename the key of an existing entry. -/
-  | rename (old new : k) (mem : old ∈ m := by grind) (notMem : new ∉ m := by grind)
+  | rename (old new : k)
   deriving Repr
 
-def Std.HashMap.Operation.cost {m : Std.HashMap k α} {op : α → Type v} [∀ a, Repr (op a)] :
-    m.Operation op → Nat
-  | .insert _ _ _ => 2
-  | .remove _ _ => 7
-  | .rename _ _ _ _ => 1
-  | .alter _ _ _ => 5
+@[grind]
+def Std.HashMap.Operation.isValid {op : Type v} [HasExecution α op] (m : Std.HashMap k α) :
+    Operation k α op → Bool
+  | .insert new value => new ∉ m
+  | .rename old new => old ∈ m ∧ new ∉ m
+  | .alter key operation =>
+      ∃ (h : key ∈ m), HasExecution.isValid m[key] operation
+  | .remove key => key ∈ m
 
-variable {op : α → Type t} [∀ a, Repr (op a)] [HasOperations α op]
+def Std.HashMap.Operation.cost {op : Type v} [HasExecution α op] :
+    Operation k α op → Nat
+  | .insert _ _ => 2
+  | .remove _ => 7
+  | .rename _ _ => 1
+  | .alter _ _ => 5
 
-def Std.HashMap.Operation.result {m : Std.HashMap k α} :
-    m.Operation op → Std.HashMap k α
-  | .insert new value _ => m.insert new value
-  | .rename old new _ _ => (m.insert new m[old]).erase old
-  | .alter key _ operation => m.insert key <| HasOperations.execute _ operation
-  | .remove key _ => m.erase key
+variable {op : Type t} [HasOperations α op]
 
+instance : HasExecution (Std.HashMap k α) (Std.HashMap.Operation k α op) where
+  isValid m operation := operation.isValid m
+  execute m operation isValid := match operation with
+    | .insert new value => m.insert new value
+    | .rename old new =>
+      have : old ∈ m := by grind
+      (m.insert new m[old]).erase old
+    | .alter key operation =>
+      have h : key ∈ m := by grind
+      m.insert key (HasExecution.execute m[key] operation <| by grind)
+    | .remove key => m.erase key
+
+@[simp, grind =]
+theorem Std.HashMap.hasExecutionIsValid_def (m : Std.HashMap k α)
+    (op : Std.HashMap.Operation k α op)  :
+    HasExecution.isValid m op = op.isValid m :=
+  rfl
+
+-- TODO: prove that the result is a chain of valid operations
+-- (i.e. one can apply the whole array one by one, preserving validity in every step)
 /--
 Greedy matching algorithm producing an array of operations that turn `source` into `target`.
 Strategy:
@@ -51,9 +77,9 @@ Strategy:
 -/
 -- Universes are monomorphized here, otherwise the monadic code fails, because
 -- it can only run in one `Id` monad.
-def Std.HashMap.operations [BEq α] (source target : Std.HashMap k α) :
-    Array (source.Operation op) := Id.run do
-  let mut ops : Array (source.Operation op) := #[]
+def Std.HashMap.operations [LawfulBEq k] [BEq α] (source target : Std.HashMap k α) :
+    Array (Operation k α op) := Id.run do
+  let mut ops := #[]
   let mut renamedSource : Std.HashSet k := {}
   let mut renamedTarget : Std.HashSet k := {}
 
@@ -65,7 +91,7 @@ def Std.HashMap.operations [BEq α] (source target : Std.HashMap k α) :
       if sourceVal != targetVal then
         let valOperations := HasOperations.operations (op := op) sourceVal targetVal
         for valOp in valOperations do
-          ops := ops.push (.alter key (by grind) valOp)
+          ops := ops.push (.alter key valOp)
 
   -- Second: greedy rename optimization
   -- Collect all source-only and target-only keys first to avoid nested loops
@@ -103,6 +129,6 @@ def Std.HashMap.operations [BEq α] (source target : Std.HashMap k α) :
 
   return ops
 
-instance [BEq α] : HasOperations (Std.HashMap k α) (Std.HashMap.Operation op) where
-  execute _ operation := operation.result
+instance [LawfulBEq k] [BEq α] :
+    HasOperations (Std.HashMap k α) (Std.HashMap.Operation k α op) where
   operations source target := source.operations target
