@@ -116,10 +116,19 @@ def InformationSchema.model : Model catalog InformationSchema where
   index := .information_schema
 
 instance : DBMonadWithMigrations M where
-  createTable name table := do
+  execute operation := do
     let conn := (← get).connection
-    let sql : SQL.Migration.CreateTable := .fromTable table name
-    _ ← conn.exec sql.toString
+    let sql : SQL.Migration.Operation := .fromDatabaseOperation operation
+    IO.println s!"Executing {sql.toString}"
+    let res ← conn.exec sql.toString
+    match res with
+    | .failure err =>
+      IO.println s!"Error {repr err}"
+      throw .fatal
+    | .data _ =>
+      IO.println s!"Returned data when no data was expected."
+      throw .fatal
+    | .success => pure ()
   currentDatabase := do
     let q : QuerySet InformationSchema.model := .all _
     let infos ← q.fetch

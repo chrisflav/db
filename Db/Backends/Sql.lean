@@ -111,7 +111,7 @@ structure FieldDef where
   nullable : Bool
 
 def FieldDef.toString (fieldDef : FieldDef) : String :=
-  s!"{fieldDef.name}  {fieldDef.type}{if not fieldDef.nullable then "NOT NULL" else ""}"
+  s!"{fieldDef.name}  {fieldDef.type}{if not fieldDef.nullable then " NOT NULL" else ""}"
 
 def FieldDef.fromColumn (column : Column) (name : String) : FieldDef where
   name := name
@@ -148,9 +148,12 @@ def CreateTable.toString (cmd : CreateTable) : String :=
 
 inductive AlterColumnCommand where
   | setType (type : String)
+  | setNullable (nullable : Bool)
 
 def AlterColumnCommand.toString : AlterColumnCommand → String
   | setType type => s!"TYPE {type}"
+  | setNullable true => "DROP NOT NULL"
+  | setNullable false => "SET NOT NULL"
 
 inductive AlterTableCommand where
   | addColumn (field : FieldDef)
@@ -163,6 +166,16 @@ def AlterTableCommand.toString : AlterTableCommand → String
   | renameColumn oldName newName => s!"RENAME COLUMN {oldName} TO {newName}"
   | alterColumn name cmd => s!"ALTER COLUMN {name} {cmd.toString}"
   | dropColumn name => s!"DROP COLUMN {name}"
+
+def AlterTableCommand.fromTableOperation : TableOperation → List AlterTableCommand
+  | .insert name col => [.addColumn (.fromColumn col name)]
+  | .remove name => [.dropColumn name]
+  | .rename old new => [.renameColumn old new]
+  -- TODO: this is currently ignoring the `nullable` field
+  | .alter name col => [
+      .alterColumn name (.setType <| DBType.toString col.type),
+      .alterColumn name (.setNullable <| col.nullable)
+    ]
 
 structure AlterTable where
   tableName : String
@@ -196,6 +209,39 @@ def AlterTable.fromMap (tableName : String) {source target : Table}
         continue
       ops := .addColumn (.fromColumn (target.columns index) s!"{index}") :: ops
     return ops
+
+structure DropTable where
+  tableName : String
+
+def DropTable.toString (cmd : DropTable) : String :=
+  s!"DROP TABLE {cmd.tableName}"
+
+structure RenameTable where
+  oldName : String
+  newName : String
+
+def RenameTable.toString (cmd : RenameTable) : String :=
+  s!"ALTER TABLE {cmd.oldName} RENAME TO {cmd.newName}"
+
+inductive Operation where
+  | dropTable : DropTable → Operation
+  | alterTable : AlterTable → Operation
+  | renameTable : RenameTable → Operation
+  | createTable : CreateTable → Operation
+
+def Operation.toString : Operation → String
+  | .dropTable cmd => cmd.toString
+  | .createTable cmd => cmd.toString
+  | .alterTable cmd => cmd.toString
+  | .renameTable cmd => cmd.toString
+
+def Operation.fromDatabaseOperation : DatabaseOperation → Operation
+  | .insert name table => .createTable (.fromTable table.table name)
+  | .remove name => .dropTable { tableName := name }
+  | .rename old new => .renameTable { oldName := old
+                                      newName := new }
+  | .alter name op => .alterTable { tableName := name
+                                    commands := AlterTableCommand.fromTableOperation op }
 
 end Migration
 

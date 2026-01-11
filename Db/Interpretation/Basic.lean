@@ -26,7 +26,19 @@ class DBMonadWithMigrations (m : Type → Type) where
   -- init (d : Database) : m Unit
   /-- The current database configuration. -/
   currentDatabase : m DatabaseRecipe
-  /- Execute the given migration. -/
-  -- migrate {source target : Database} (migration : source.Migration target) : m Unit
-  -- TODO: Replace this with a proper implementation.
-  createTable (name : String) (table : Table) : m Unit
+  /- Execute the given operation. -/
+  execute (op : DatabaseOperation) : m Unit
+
+namespace DBMonadWithMigrations
+
+attribute [instance] DBMonadWithMigrations.dbMonad
+
+variable {m : Type → Type} [DBMonadWithMigrations m] [Monad m]
+
+def executeMany (operations : Array DatabaseOperation) : m Unit := do
+  operations.forM execute
+
+def init (database : DatabaseRecipe) : m Unit := do
+  executeMany <| DatabaseRecipe.operations ∅ database
+
+end DBMonadWithMigrations

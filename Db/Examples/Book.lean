@@ -46,25 +46,23 @@ section Migrations
 def filePath : System.FilePath :=
   "migrations" / "book"
 
-abbrev initial : Array DatabaseOperation :=
-  #[.insert "author"
-    { columns := .ofArray #[
-        ("age21", { type := .int, nullable := false })
-      ]
-    }
-  ]
+abbrev initial : MigrationRecipe ∅ where
+  operations :=
+    #[.insert "author"
+      { columns := .ofArray #[
+          ("age", { type := .int, nullable := true })
+        ]
+      }
+    ]
 
-abbrev initial.result : DatabaseRecipe :=
-  HasExecution.execute ∅ initial[0] <| by grind
+abbrev mig1 : MigrationRecipe initial.execute where
+  operations :=
+    #[.alter "author" (.rename "age" "age21"),
+      .alter "author" (.rename "age21" "age"),
+    ]
 
-abbrev mig1 : Array DatabaseOperation :=
-  #[.alter "author"
-    (.alter "age" { type := .int, nullable := false })
-  ]
-
--- TODO: add (grind) API to prove certain operations preserve validity
-def mig1.result : DatabaseRecipe :=
-  HasExecution.execute initial.result mig1[0] sorry
+abbrev mig2 : MigrationRecipeWithTarget mig1.execute database.recipe where
+  operations := mig1.execute.operations database.recipe
 
 end Migrations
 
@@ -75,15 +73,13 @@ def test : IO Unit := do
       retired := false }
   let q : QuerySet authorModel := Query.all authorModel.index
   let x : PostgreSQL.M _ := do
-    let d ← DBMonadWithMigrations.currentDatabase
-    for op in d.operations database.recipe do
-      IO.println (repr op)
-    q.fetch
+    DBMonadWithMigrations.execute (.remove "author")
+    DBMonadWithMigrations.executeMany initial.operations
+    DBMonadWithMigrations.executeMany mig1.operations
+    DBMonadWithMigrations.executeMany mig2.operations
   let res ← PostgreSQL.runDB "postgresql://testuser:secret@localhost/testdb2" x
   match res with
   | .error e => IO.println s!"Error occured: {repr e}."
-  | .ok authors =>
-    for author in authors do
-      IO.println s!"Fetched author {repr author}."
+  | .ok _ => IO.println "Migration successful."
 
 end BookExample

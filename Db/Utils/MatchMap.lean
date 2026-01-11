@@ -12,6 +12,36 @@ variable {k : Type t} {α : Type t} [BEq k] [Hashable k]
 class HasExecution (α : Type u) (op : Type t) where
   isValid : α → op → Bool
   execute (init : α) (operation : op) : isValid init operation → α
+  execute? (init : α) (operation : op) : Option α :=
+    if h : isValid init operation then
+      some (execute init operation h)
+    else
+      none
+
+namespace HasExecution
+
+variable {α : Type u} {op : Type t} [HasExecution α op]
+
+def executeList? (start : α) (l : List op) : Option α :=
+  l.foldlM execute? start
+
+def executeArray? (start : α) (l : Array op) : Option α :=
+  l.foldlM execute? start
+
+def isValidArray (start : α) (l : Array op) : Bool :=
+  (l.foldl
+    (fun (cur, cont) operation =>
+      if h : cont && isValid cur operation then
+        (execute cur operation (by grind), true)
+      else
+        (cur, false))
+    (start, true)).snd
+
+def executeArray (start : α) (l : Array op) (_h : isValidArray start l) : α :=
+  l.foldl (fun cur operation =>
+    if h : isValid cur operation then execute cur operation h else cur) start
+
+end HasExecution
 
 class HasOperations (α : Type u) (op : Type t) extends HasExecution α op where
   operations (source target : α) : Array op
@@ -28,6 +58,18 @@ inductive Std.HashMap.Operation (op : Type v) where
   /-- Rename the key of an existing entry. -/
   | rename (old new : k)
   deriving Repr
+
+def Std.HashMap.Operation.modifiedKeys {op : Type v} : Operation k α op → List k
+  | .insert _ _ => []
+  | .alter key _ => [key]
+  | .remove key => [key]
+  | .rename old _ => [old]
+
+def Std.HashMap.Operation.newKeys {op : Type v} : Operation k α op → List k
+  | .insert new _ => [new]
+  | .alter _ _ => []
+  | .remove _ => []
+  | .rename _ new => [new]
 
 @[grind]
 def Std.HashMap.Operation.isValid {op : Type v} [HasExecution α op] (m : Std.HashMap k α) :
@@ -57,6 +99,16 @@ instance : HasExecution (Std.HashMap k α) (Std.HashMap.Operation k α op) where
     | .alter key operation =>
       have h : key ∈ m := by grind
       m.insert key (HasExecution.execute m[key] operation <| by grind)
+    | .remove key => m.erase key
+  execute? m operation := match operation with
+    | .insert new value => m.insert new value
+    | .rename old new => do
+        let oldVal ← m[old]?
+        (m.insert new oldVal).erase old
+    | .alter key operation => do
+        let oldVal ← m[key]?
+        let newVal ← HasExecution.execute? oldVal operation
+        m.insert key newVal
     | .remove key => m.erase key
 
 @[simp, grind =]

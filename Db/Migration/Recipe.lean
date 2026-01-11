@@ -148,3 +148,19 @@ def TableRecipe.operations (source target : TableRecipe) :
 def DatabaseRecipe.operations (source target : DatabaseRecipe) :
     Array DatabaseOperation :=
   HasOperations.operations source target
+
+/-- A recipe for a migration valid for the database configuration `source`. -/
+structure MigrationRecipe (source : DatabaseRecipe) where
+  operations : Array DatabaseOperation
+  isValidArray_operations : HasExecution.isValidArray source operations := by native_decide
+
+/-- Execute the given recipe by applying the operations in order. -/
+def MigrationRecipe.execute {source : DatabaseRecipe} (migration : MigrationRecipe source) :
+    DatabaseRecipe :=
+  HasExecution.executeArray source migration.operations migration.isValidArray_operations
+
+/-- A migration recipe from `source` to `target` is a migration recipe valid for `source`
+that turns `source` into `target`. -/
+structure MigrationRecipeWithTarget (source target : DatabaseRecipe) extends
+    MigrationRecipe source where
+  operations_execute_eq_nil : toMigrationRecipe.execute.operations target = #[] := by native_decide
