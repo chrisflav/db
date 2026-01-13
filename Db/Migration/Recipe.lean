@@ -90,6 +90,9 @@ def Database.recipe (database : Database) : DatabaseRecipe where
   tables := .ofArray <|
     (Enum.all database.Index).map fun idx => (toString idx, database.tables idx |>.recipe)
 
+instance : Coe Database DatabaseRecipe where
+  coe d := d.recipe
+
 instance : EmptyCollection DatabaseRecipe where
   emptyCollection := { tables := ∅ }
 

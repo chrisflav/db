@@ -25,15 +25,20 @@ variable {d : Database} {α : Type} {model : Model d α}
 abbrev Model.table (model : Model d α) : Table :=
   d.tables model.index
 
+/-- Typeclass expressing that `α` has a chosen model in a database. -/
+class HasModel (α : Type) where
+  database (α) : Database
+  model (α) : Model database α
+
 -- TODO: add meta code / DSL (?) to construct querysets for models
 /-- A queryset for a model `m` is a query on the corresponding database table. -/
-def QuerySet {d : Database} {α : Type} (model : Model d α) : Type 1 :=
-  Query d (Table.names model.index)
+protected def Model.Query {d : Database} {α : Type} (model : Model d α) : Type 1 :=
+  _root_.Query d (Table.names model.index)
 
 variable {m : Type → Type} [DBMonad d m] [Monad m] [MonadExcept String m]
 
 /-- Fetch the given queryset from the database. -/
-def QuerySet.fetch (q : QuerySet model) : m (Array α) := do
+def Model.Query.fetch (q : model.Query) : m (Array α) := do
   let res ← DBMonad.lookup q
   res.filterMapM fun map => OptionT.run do
     let x : model.table.Entry ← .mk <$> Enum.distribM fun c =>
@@ -49,3 +54,29 @@ def Model.insert (model : Model d α) (a : α) : m Unit := do
   let data : d.Insert model.index :=
     { entry := HasTable.encoding.toFun a }
   DBMonad.insert data
+
+/-- A queryset on a type with canonical model is a query on the model. -/
+structure QuerySet (α : Type) [HasModel α] where
+  query : (HasModel.model α).Query
+
+namespace QuerySet
+
+variable {α : Type} [HasModel α]
+
+def all : QuerySet α where
+  query := .all _
+
+end QuerySet
+
+namespace HasModel
+
+variable {α : Type} [HasModel α]
+variable {m : Type → Type} [DBMonadWithMigrations m] [Monad m] [MonadExcept String m]
+
+def fetch (q : QuerySet α) : m (Array α) :=
+  q.query.fetch
+
+def insert (x : α) : m Unit :=
+  (HasModel.model α).insert x
+
+end HasModel

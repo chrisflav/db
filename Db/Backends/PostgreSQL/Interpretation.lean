@@ -77,6 +77,7 @@ structure InformationSchema where
   data_type : VarChar 100
   -- TODO: add `DBType.nat` and change this to `Nat`
   character_maximum_length : Option Int
+  table_schema : VarChar 100
   deriving Repr
 
 def InformationSchema.column (info : InformationSchema) : Option Column := do
@@ -130,7 +131,11 @@ instance : DBMonadWithMigrations M where
       throw .fatal
     | .success => pure ()
   currentDatabase := do
-    let q : QuerySet InformationSchema.model := .all _
+    let q : InformationSchema.model.Query :=
+      .filter (.all _)
+        (.eq (.var { tableName := CatalogIndex.information_schema
+                     columnName := InformationSchemaIndex.table_schema } (.varchar 100))
+                     (.str (v"public")))
     let infos ← q.fetch
     let mut tables := .emptyWithCapacity
     for info in infos do

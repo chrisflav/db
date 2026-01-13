@@ -41,4 +41,9 @@ def executeMany (operations : Array DatabaseOperation) : m Unit := do
 def init (database : DatabaseRecipe) : m Unit := do
   executeMany <| DatabaseRecipe.operations ∅ database
 
+/-- Automatically update the current database schema to match `target`. -/
+def autoUpdate (target : DatabaseRecipe) : m Unit := do
+  let source ← currentDatabase
+  executeMany <| source.operations target
+
 end DBMonadWithMigrations

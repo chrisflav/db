@@ -5,3 +5,5 @@ Authors: Christian Merten
 -/
 import Db.Model.Meta.Attribute
 import Db.Model.Meta.GenerateTable
+import Db.Model.Meta.Database
+import Db.Model.Meta.DatabaseTag
