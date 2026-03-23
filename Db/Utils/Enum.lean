@@ -38,6 +38,19 @@ def Enum.distribM {α : Type u} [Enum α] {m : Type u → Type u'} [Monad m] {β
   let g ← Fin.distribM fun i => f <| Enum.encoding.invFun i
   return fun a => cast (congrArg _ <| by simp) <| g (Enum.encoding.toFun a)
 
+/-- If `α` is enumerated, to construct a (dependent) function `(a : α) → β α`,
+it suffices to construct a (total) hashmap. -/
+def Enum.fromHashMap? {α : Type u} [Enum α] [BEq α] [LawfulBEq α] [Hashable α] {β : α → Type u}
+    (map : Std.DHashMap α β) :
+    Option ((a : α) → β a) := do
+  Enum.distribM fun c =>
+    let val := map.get? c
+    match val with
+    | some val => return val
+    | none =>
+      -- TODO: add logging here
+      failure
+
 open Qq Lean Elab Command
 
 def fromEnumWithMotive (name : Name) (expr : Array Expr) (motive : Expr) : MetaM Expr := do

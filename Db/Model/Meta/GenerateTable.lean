@@ -162,7 +162,7 @@ def generateHasTable (decl indexName tableName : Name) : CommandElabM Unit := do
       Meta.mkLambdaFVars #[x] body
     let invFun : Expr ← Meta.withLocalDecl `x BinderInfo.default entryType fun x => do
       -- The values function of the entry
-      let valFun : Expr ← Meta.mkAppM ``Table.Entry.values #[x]
+      let valFun : Expr ← Meta.mkAppM ``Table.Entry.value #[x]
       let body : Expr ← do
         -- Construct term of structure
         Meta.mkAppM (decl ++ `mk)

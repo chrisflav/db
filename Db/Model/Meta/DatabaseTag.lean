@@ -9,9 +9,15 @@ import Lean
 
 open Lean Elab Command
 
+structure TableInfo where
+  tableDecl : Name
+  typeDecl? : Option Name
+  tableName : Option String
+  deriving DecidableEq, Hashable
+
 structure DatabaseTag where
   databaseDecl : Name
-  tables : Array (Name × Option String)
+  tables : Array TableInfo
   -- TODO: support setting a different table-in-db name as string
   deriving DecidableEq, Hashable
 

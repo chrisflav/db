@@ -40,25 +40,42 @@ def test : IO Unit := do
   let drama : Book :=
     { title := v"A drama"
       author := lisa.name  }
-  let x : PostgreSQL.M (Array Author) := do
+  let database := HasModel.database Author
+  let authorModel := HasModel.model Author
+  let bookModel := HasModel.model Book
+  /-
+  let q : QuerySet Book ← do
+    all where author.retired = true
+  -/
+  let q : QuerySet Book :=
+    { query :=
+      Query.project (View.sumInr _ _) <|
+      Query.filter (.eq (.var (Sum.inl AuthorIndex.retired) .bool) .true) <|
+      Query.filter
+        (.eq (.var (Sum.inl AuthorIndex.name) (.varchar 100))
+             (.var (Sum.inr BookIndex.author) (.varchar 100)))
+        (Query.join (.all <| authorModel.index) (.all <| bookModel.index)) }
+  -- IO.println (SQL.Select.fromQuery q).toString
+  let x : PostgreSQL.M (Array Book) := do
     -- Update database schema to target schema
-    autoUpdate (%database mydb)
+    -- autoUpdate (%database mydb)
     -- Insert `mike` into the `Author` table
-    insert mike
-    insert lisa
+    -- insert mike
+    -- insert lisa
     -- Insert `novel` into the `Book` table
-    insert novel
-    insert drama
+    -- insert novel
+    -- insert drama
     -- Print all books
-    for book in (← fetch .all) do
-      IO.println s!"Book: {Book.title book}"
+    -- for book in (← fetch .all) do
+    --   IO.println s!"Book: {Book.title book}"
     -- Fetch all authors from the `Author` table.
-    fetch .all
+    -- fetch .all
+    fetch q
   let res ← PostgreSQL.runDB "postgresql://testuser:secret@localhost/testdb2" x
   match res with
   | .error e => IO.println s!"Error occured: {repr e}."
-  | .ok authors =>
-    for author in authors do
-      IO.println s!"{author.name} has age {author.age}."
+  | .ok books =>
+    for book in books do
+      IO.println s!"Book {book.title} by {book.author}."
 
 end BookExample

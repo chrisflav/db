@@ -41,24 +41,25 @@ def runDB (connectionInfo : String) {α : Type} (x : M α) : IO (Except Exceptio
   | none => return .error .connectionError
 
 instance (d : Database) : DBMonad d M where
-  lookup {names} q := do
+  lookup {view} q := do
     let conn := (← get).connection
     let sql : SQL.Select := .fromQuery q
     let res ← conn.exec sql.toString
     match res with
     | .data data =>
-        data.rawRows.mapM <| fun row ↦ do
-          let mut map := default
-          for name in names do
-            if h : name.toString ∈ row then do
-              let x := row[name.toString]
-              match (FromString.fromString row[name.toString] :
-                  Option name.column.Value) with
-              | some val => map := map.insert name val
-              | none => pure ()
-            else
-              pure ()
-          return map
+        data.rawRows.filterMapM <| fun row ↦ do
+          return .mk <$> Enum.fromHashMap? (← do
+            let mut map := default
+            for idx in Enum.all view.Index do
+              if h : s!"{idx}" ∈ row then do
+                let x := row[s!"{idx}"]
+                match (FromString.fromString row[s!"{idx}"] :
+                    Option (view.name idx).column.Value) with
+                | some val => map := map.insert idx val
+                | none => pure ()
+              else
+                pure ()
+            return map)
     | .failure e => do
       IO.println s!"{repr e}"
       throw .fatal
@@ -132,10 +133,10 @@ instance : DBMonadWithMigrations M where
     | .success => pure ()
   currentDatabase := do
     let q : InformationSchema.model.Query :=
-      .filter (.all _)
-        (.eq (.var { tableName := CatalogIndex.information_schema
-                     columnName := InformationSchemaIndex.table_schema } (.varchar 100))
+      .filter
+        (.eq (.var InformationSchemaIndex.table_schema (.varchar 100))
                      (.str (v"public")))
+        (.all _)
     let infos ← q.fetch
     let mut tables := .emptyWithCapacity
     for info in infos do

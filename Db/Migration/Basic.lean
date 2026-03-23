@@ -104,7 +104,8 @@ is a recipe how to turn data in `source` into data in `target`.
 structure Database.Migration (source target : Database) where
   map : source.Index → target.Index
   indexing : Indexing.Map map
-  entry (i : source.Index) (e : (source.tables i).Entry) : (target.tables (map i)).Entry
+  entry (i : source.Index) (e : (Table.view i).Entry) :
+    (Table.view (map i)).Entry
 
 inductive Column.MigrationStep (column : Column) where
 
@@ -123,6 +124,7 @@ inductive Database.MigrationStep (database : Database) where
 def Table.addColumn (table : Table) (name : String) (col : Column) : Table :=
   haveI : Disjoint table.Index (IUnit name) := sorry
   { Index := table.Index ⊕ IUnit name
+    indexing := .sumOfDisjoint _ _
     columns := Sum.elim table.columns fun _ ↦ col }
 
 def Table.MigrationStep.result {table : Table} : table.MigrationStep → Table

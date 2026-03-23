@@ -7,6 +7,7 @@ import Std
 import Db.Utils.VarChar
 import Db.Utils.FromString
 import Db.Utils.Enum
+import Db.Utils.String
 
 class Indexing (α : Type) : Type extends Enum α, Hashable α where
   [decidableEq : DecidableEq α]
@@ -41,11 +42,12 @@ class Disjoint (α β : Type) [Indexing α] [Indexing β] : Prop where
   fromString_eq_none_left (a : α) : (FromString.fromString (toString a) : Option β) = none
   fromString_eq_none_right (b : β) : (FromString.fromString (toString b) : Option α) = none
 
-instance (α β : Type) [Indexing α] [Indexing β] [Disjoint α β] : Indexing (α ⊕ β) where
+def Indexing.sumOfDisjoint (α β : Type) [Indexing α] [Indexing β] [Disjoint α β] :
+    Indexing (α ⊕ β) where
   length := Enum.length α + Enum.length β
   encoding :=
     (Equiv.sumCongr Enum.encoding Enum.encoding).trans finSumFinEquiv
-  toString.toString := Sum.elim toString toString
+  toString.toString := Sum.elim ToString.toString ToString.toString
   fromString.fromString s :=
     match (FromString.fromString s : Option α) with
     | some x => some (.inl x)
@@ -57,6 +59,30 @@ instance (α β : Type) [Indexing α] [Indexing β] [Disjoint α β] : Indexing 
     obtain (a | b) := x
     · simp
     · simp [Disjoint.fromString_eq_none_right]
+
+def Indexing.sum (α β : Type) [Indexing α] [Indexing β] : Indexing (α ⊕ β) where
+  length := Enum.length α + Enum.length β
+  encoding :=
+    (Equiv.sumCongr Enum.encoding Enum.encoding).trans finSumFinEquiv
+  toString.toString :=
+    Sum.elim (fun a => s!"left__{ToString.toString a}")
+      (fun a => s!"right__{ToString.toString a}")
+  fromString.fromString s := do
+    if let some suffix := s.dropPrefix? "left__" then
+      let a : α ← FromString.fromString suffix.toString
+      return .inl a
+    else if let some suffix := s.dropPrefix? "right__" then
+      let a : β ← FromString.fromString suffix.toString
+      return .inr a
+    else
+      none
+  hash :=
+    -- this is probably bad?
+    Sum.elim hash hash
+  fromString_toString x := by
+    obtain (a | b) := x
+    · simp
+    · simp [String.dropPrefix?_append_of_ne]
 
 inductive DBType where
   | bool : DBType
@@ -111,6 +137,10 @@ instance : (col : Column) → Inhabited col.Value
   | { type := _, nullable := false } => inferInstance
   | { type := _, nullable := true } => inferInstance
 
+instance : (col : Column) → ToString col.Value
+  | { type := _, nullable := false } => inferInstance
+  | { type := _, nullable := true } => inferInstance
+
 example : (Column.mk .int false).Value = Int := rfl
 
 structure Table where
@@ -122,7 +152,7 @@ attribute [instance] Table.indexing
 
 @[ext]
 structure Table.Entry (table : Table) : Type where
-  values (c : table.Index) : (table.columns c).Value
+  value (idx : table.Index) : (table.columns idx).Value
 
 structure Database where
   Index : Type
@@ -145,56 +175,77 @@ structure Database.Ident (d : Database) where
 def Database.Ident.table {d : Database} (i : d.Ident) : Table :=
   d.tables i.tableName
 
-inductive List.HasElem {α : Type} : List (String × α) → String → Type
-  | here (key : String) (x : α) (l : List (String × α)) : HasElem ((key, x) :: l) key
-  | there {key : String} {x : α} {l : List (String × α)}
-      (h : l.HasElem key) (y : String × α) : HasElem (y :: l) key
-
-def List.HasElem.get {α : Type} {l : List (String × α)} {key : String} :
-      l.HasElem key → α
-  | here key x l => x
-  | there h y => h.get
-
-structure List.HasElem' {α : Type} (l : List (String × α)) (key : String) where
-  idx : Fin l.length
-  x : α
-  h : l[idx] = (key, x)
-
-def List.HasElem'.get {α : Type} (l : List (String × α)) (key : String)
-    (h : l.HasElem' key) : α :=
-  h.x
-
-abbrev foo : List (String × Nat) := [("foo", 3), ("bar", 5)]
-
-abbrev fooHasElem : foo.HasElem "foo" := by
-  repeat constructor
-
-example : fooHasElem.get = 3 := rfl
-
 def Database.Ident.dbtype {d : Database} (i : d.Ident) : DBType :=
   i.column.type
 
 def Database.Ident.toString {d : Database} (i : d.Ident) : String :=
-  s!"{i.tableName}.{i.columnName}"
+  s!"{i.tableName}__{i.columnName}"
 
-inductive DBExpr (d : Database) : DBType → Type 1 where
-  | true : DBExpr d .bool
-  | false : DBExpr d .bool
-  | and (e₁ e₂ : DBExpr d .bool) : DBExpr d .bool
-  | eq {t : DBType} (e₁ e₂ : DBExpr d t) : DBExpr d .bool
-  | var (i : d.Ident) (t : DBType) : DBExpr d t
-  | str {n : Nat} (s : VarChar n) : DBExpr d (.varchar n)
+def Database.Ident.all (d : Database) : Array d.Ident := Id.run do
+  let mut res := #[]
+  for table in Enum.all d.Index do
+    for column in Enum.all (d.tables table).Index do
+      res := res.push { tableName := table
+                        columnName := column }
+  return res
 
 inductive Database.Name (d : Database) where
   | ident (i : d.Ident) : Name d
   | computation (n : String) (t : DBType) : Name d
   deriving DecidableEq, Hashable
 
+structure View (d : Database) where
+  Index : Type
+  [indexing : Indexing Index]
+  name : Index → d.Name
+
+attribute [instance] View.indexing
+
+def View.prod {d : Database} (view₁ view₂ : View d) : View d where
+  Index := view₁.Index ⊕ view₂.Index
+  indexing := .sum _ _
+  name := Sum.elim view₁.name view₂.name
+
+structure View.Hom {d : Database} (view₁ view₂ : View d) where
+  map : view₁.Index → view₂.Index
+  name_map (idx : view₁.Index) : view₂.name (map idx) = view₁.name idx
+
+attribute [simp] View.Hom.name_map
+
+def View.Hom.id {d : Database} (view : View d) : Hom view view where
+  map i := i
+  name_map _ := rfl
+
+def View.Hom.comp {d : Database} {view₁ view₂ view₃ : View d} (f : view₁.Hom view₂)
+    (g : view₂.Hom view₃) : Hom view₁ view₃ where
+  map := g.map ∘ f.map
+  name_map _ := by simp
+
+def View.sumInl {d : Database} (view₁ view₂ : View d) : Hom view₁ (view₁.prod view₂) where
+  map := Sum.inl
+  name_map _ := rfl
+
+def View.sumInr {d : Database} (view₁ view₂ : View d) : Hom view₂ (view₁.prod view₂) where
+  map := Sum.inr
+  name_map _ := rfl
+
+inductive DBExpr {d : Database} (view : View d) : DBType → Type 1 where
+  | true : DBExpr view .bool
+  | false : DBExpr view .bool
+  | and (e₁ e₂ : DBExpr view .bool) : DBExpr view .bool
+  | eq {t : DBType} (e₁ e₂ : DBExpr view t) : DBExpr view .bool
+  | var (i : view.Index) (t : DBType) : DBExpr view t
+  | str {n : Nat} (s : VarChar n) : DBExpr view (.varchar n)
+
 def Database.Name.column {d : Database} : d.Name → Column
   | .ident i => i.column
   | .computation _ t =>
     { type := t
       nullable := false }
+
+@[ext]
+structure View.Entry {d : Database} (view : View d) : Type where
+  value (idx : view.Index) : (view.name idx).column.Value
 
 def Database.Name.dbtype {d : Database} : d.Name → DBType
   | .ident i => i.dbtype
@@ -209,16 +260,35 @@ def Table.names {d : Database} (tname : d.Index) :
   .ofList ((Enum.all (d.tables tname).Index).toList.map
     fun i ↦ .ident ⟨tname, i, (d.tables tname).columns i, rfl⟩)
 
--- TODO: add join operations
+def Table.view {d : Database} (tableName : d.Index) : View d where
+  Index := (d.tables tableName).Index
+  name colName := .ident { tableName := tableName
+                           columnName := colName }
+
+-- TODO: add simp lemmas
+def Table.entryViewEquiv {d : Database} (tableName : d.Index) :
+    (Table.view tableName).Entry ≃ (d.tables tableName).Entry where
+  toFun e := { value idx := e.value idx }
+  invFun e := { value idx := e.value idx }
+
 /--
 A query on the database `d` indexed over the (unique) names of the outputs.
 -/
-inductive Query (d : Database) : Std.HashSet d.Name → Type 1 where
-  | all (table : d.Index) : Query d (Table.names table)
-  | filter {s : Std.HashSet d.Name} (q : Query d s) (e : DBExpr d .bool) : Query d s
+inductive Query (d : Database) : View d → Type 1 where
+  /-- All rows of a table. -/
+  | all (table : d.Index) : Query d (Table.view table)
+  /-- Filter a query by a condition. -/
+  | filter {view : View d} (e : DBExpr view .bool) (q : Query d view) : Query d view
+  /--
+  Cross join (cartesian product). All other join operations can be obtained combining this
+  with the appropriate filter condition.
+  -/
+  | join {s t : View d} (q₁ : Query d s) (q₂ : Query d t) : Query d (s.prod t)
+  -- Example: `Query d (s.prod t) -> Query d s`
+  | project {s t : View d} (p : t.Hom s) (q₁ : Query d s) : Query d t
 
 def signature {d : Database} (s : Std.HashSet d.Name) : Std.HashMap d.Name DBType :=
   s.inner.map (fun n _ ↦ n.dbtype)
 
 structure Database.Insert (d : Database) (tableName : d.Index) where
-  entry : (d.tables tableName).Entry
+  entry : (Table.view tableName).Entry

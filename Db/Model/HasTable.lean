@@ -30,34 +30,75 @@ class HasModel (α : Type) where
   database (α) : Database
   model (α) : Model database α
 
+class HasView (α : Type) where
+  database (α) : Database
+  view (α) : View database
+  encoding : α ≃ view.Entry
+
 -- TODO: add meta code / DSL (?) to construct querysets for models
 /-- A queryset for a model `m` is a query on the corresponding database table. -/
 protected def Model.Query {d : Database} {α : Type} (model : Model d α) : Type 1 :=
-  _root_.Query d (Table.names model.index)
+  _root_.Query d (Table.view model.index)
 
 variable {m : Type → Type} [DBMonad d m] [Monad m] [MonadExcept String m]
 
 /-- Fetch the given queryset from the database. -/
 def Model.Query.fetch (q : model.Query) : m (Array α) := do
   let res ← DBMonad.lookup q
-  res.filterMapM fun map => OptionT.run do
-    let x : model.table.Entry ← .mk <$> Enum.distribM fun c =>
-      let val := map.get? (.ident { tableName := model.index, columnName := c})
-      match val with
-      | some val => return val
-      | none =>
-        -- TODO: add logging here
-        failure
-    return HasTable.encoding.invFun x
+  return res.map fun entry =>
+    HasTable.encoding.invFun ((Table.entryViewEquiv model.index).toFun entry)
 
 def Model.insert (model : Model d α) (a : α) : m Unit := do
   let data : d.Insert model.index :=
-    { entry := HasTable.encoding.toFun a }
+    { entry := (Table.entryViewEquiv _).invFun <| HasTable.encoding.toFun a }
   DBMonad.insert data
 
 /-- A queryset on a type with canonical model is a query on the model. -/
-structure QuerySet (α : Type) [HasModel α] where
-  query : (HasModel.model α).Query
+structure QuerySet (α : Type) [HasView α] where
+  query : Query (HasView.database α) (HasView.view α)
+
+instance [HasModel α] : HasView α where
+  database := HasModel.database α
+  view := Table.view (HasModel.model _).index
+  encoding := .trans HasTable.encoding (Table.entryViewEquiv _).symm
+
+section
+
+open Lean Meta Elab
+
+declare_syntax_cat query
+
+syntax (name := queryQuote) "query%" query : term
+
+end
+
+structure QueryM (key : Type) : Type where
+
+namespace QueryM
+
+instance : Monad QueryM where
+  pure _ := {}
+  bind _ _ := {}
+
+def all (α : Type) : QueryM α where
+
+def guard (_p : Prop) : QueryM Unit where
+
+def query (α β : Type) : QueryM (α × β) := do
+  let book : α ← .all α
+  let author : β ← .all β
+  return (book, author)
+
+/-
+def query : Query ... := do
+  let book : Book ← .all Book
+  let author : Author ← .all Author
+  guard book.author = author.name
+  guard author.expired = True
+  return book
+-/
+
+end QueryM
 
 namespace QuerySet
 
@@ -66,6 +107,11 @@ variable {α : Type} [HasModel α]
 def all : QuerySet α where
   query := .all _
 
+/-
+book where book.author = author.name ∧
+           author.retired = True
+-/
+
 end QuerySet
 
 namespace HasModel
@@ -73,8 +119,9 @@ namespace HasModel
 variable {α : Type} [HasModel α]
 variable {m : Type → Type} [DBMonadWithMigrations m] [Monad m] [MonadExcept String m]
 
-def fetch (q : QuerySet α) : m (Array α) :=
-  q.query.fetch
+def fetch (q : QuerySet α) : m (Array α) := do
+  let res ← DBMonad.lookup q.query
+  return res.map HasView.encoding.invFun
 
 def insert (x : α) : m Unit :=
   (HasModel.model α).insert x

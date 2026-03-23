@@ -36,9 +36,12 @@ def elabModelTag (cfg : ModelConfig) (decl database : Name) : AttrM Unit := do
     | throwError s!"Unknown database `{database}`."
   liftCommandElabM <| do
     generateTable decl
-    let tableDecl : Name := s!"{decl}Table".toName
-    addTableToDatabase tableDecl database cfg.dbName
-    addHasModel decl database
+    let tableInfo : TableInfo :=
+      { tableDecl := s!"{decl}Table".toName
+        typeDecl? := decl
+        tableName := cfg.dbName }
+    addTableToDatabase tableInfo database
+    updateHasModels database
   addModelTag
     { declName := decl
       database := database }

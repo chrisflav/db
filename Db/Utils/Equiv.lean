@@ -31,6 +31,11 @@ def Equiv.trans {α : Type u₁} {β : Type u₂} {γ : Type u₃}
   toFun a := f.toFun (e.toFun a)
   invFun c := e.invFun (f.invFun c)
 
+def Equiv.symm {α : Type u₁} {β : Type u₂} (e : α ≃ β) :
+    β ≃ α where
+  toFun := e.invFun
+  invFun := e.toFun
+
 def Equiv.sumCongr {α₁ : Type u₁} {α₂ : Type u₂} {β₁ : Type u₃} {β₂ : Type u₄}
     (ea : α₁ ≃ α₂) (eb : β₁ ≃ β₂) :
     (α₁ ⊕ β₁) ≃ (α₂ ⊕ β₂) where

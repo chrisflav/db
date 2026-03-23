@@ -60,8 +60,10 @@ example : nameIdent.dbtype = .int := rfl
 
 example : nameIdent.dbtype.Value := (3 : Int)
 
-def q := SQL.Select.fromQuery (d := database) (.filter (.all DatabaseIndex.fish)
-  (.eq (.var nameIdent (.varchar 100)) (.str ⟨"Swordfish", by decide⟩)))
+def q := SQL.Select.fromQuery (d := database) <|
+  .filter
+    (.eq (.var FishIndex.length (.varchar 100)) (.str ⟨"Swordfish", by decide⟩))
+    (.all DatabaseIndex.fish)
 
 def ins : SQL.Insert where
   intoTable := "fish"
@@ -69,9 +71,9 @@ def ins : SQL.Insert where
 
 def ins2 : SQL.Insert :=
   SQL.Insert.fromInsert (d := database) (tableName := .fish)
-    { entry.values
+    { entry.value
         | .name => ⟨"Aal", by decide⟩
-        | .length => 56 }
+        | .length => (56 : Int) }
 
 example : String :=
   SQL.Migration.CreateTable.toString (.fromTable fish "fish")
@@ -116,13 +118,13 @@ structure Fish where
   length : Int
 
 def Fish.toEntry (f : Fish) : fish.Entry where
-  values
+  value
     | .name => f.name
     | .length => f.length
 
 def Fish.fromEntry (e : fish.Entry) : Fish where
-  name := e.values .name
-  length := e.values .length
+  name := e.value .name
+  length := e.value .length
 
 structure Many (α : Type) : Type where
 
@@ -157,13 +159,13 @@ def test : IO Unit := do
   let length : database.Name :=
     .ident lengthIdent
   let ins : database.Insert .fish :=
-    { entry.values
+    { entry.value
         | .name => ⟨"Aal", by decide⟩
-        | .length => 56 }
+        | .length => (56 : Int) }
   let q : Query database _ :=
     .filter
+      (.eq (.var FishIndex.length (.varchar 100)) (.str ⟨"Aal", by decide⟩))
       (.all DatabaseIndex.fish)
-      (.eq (.var nameIdent (.varchar 100)) (.str ⟨"Aal", by decide⟩))
   let x : PostgreSQL.M _ := do
     _ ← DBMonad.insert ins
     DBMonad.lookup q
@@ -172,9 +174,7 @@ def test : IO Unit := do
   | .error _ => IO.println "Error occured."
   | .ok val =>
     for row in val do
-      let x : VarChar 100 := row.get! name
-      let l : Int := row.get! length
-      IO.println s!"Fish {x} has length {l}."
+      IO.println s!"Fish {row.value .name} has length {row.value .length}."
     pure ()
 
 end FishExample

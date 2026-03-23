@@ -13,7 +13,10 @@ inductive Expr where
   | false
   | eq (e₁ e₂ : Expr)
   | and (e₁ e₂ : Expr)
-  | var (table column : String)
+  -- Named variable (e.g. as produced by an alias)
+  | var (name : String)
+  -- Column indexed by table and column name (printed as `table.column`)
+  | column (table column : String)
   | str (s : String)
   | int (n : Int)
   | null
@@ -24,21 +27,22 @@ def Expr.toString : Expr → String
   | .false => "false"
   | .eq e₁ e₂ => s!"({e₁.toString}) = ({e₂.toString})"
   | .and e₁ e₂ => s!"({e₁.toString}) AND ({e₂.toString})"
-  | .var table column => s!"{table}.{column}"
+  | .column table col => s!"{table}.{col}"
+  | .var name => name
   | .str s => s!"'{s}'"
   | .int n => ToString.toString n
   | .null => "NULL"
 
-def Expr.fromExpr {d : Database} {t : DBType} : DBExpr d t → Expr
+def Expr.fromExpr {d : Database} {view : View d} {t : DBType} : DBExpr view t → Expr
   | .true => true
   | .false => false
   | .eq e₁ e₂ => eq (fromExpr e₁) (fromExpr e₂)
   | .and e₁ e₂ => and (fromExpr e₁) (fromExpr e₂)
   | .str s => .str s.1
-  | .var s _ => .var (ToString.toString s.tableName) (ToString.toString s.columnName)
+  | .var idx _ => .var (ToString.toString idx)
 
 def Expr.fromName {d : Database} : d.Name → Expr
-  | .ident ident => .var (ToString.toString ident.tableName) (ToString.toString ident.columnName)
+  | .ident ident => .column s!"{ident.tableName}" s!"{ident.columnName}"
   -- TODO: placeholder implementation, fix this
   | .computation name _ => .str name
 
@@ -51,24 +55,105 @@ def Selector.toString : Selector → String
   | .all => "*"
   | .fields fs => ", ".intercalate (fs.map <| fun f ↦ s!"{f.2.toString} as \"{f.1}\"")
 
-structure Select where
-  selector : Selector
-  fromTable : String
-  condition : Expr
-  -- join
+inductive JoinType where
+  | inner
+  | outer
   deriving Repr
 
-def Select.toString (s : Select) : String :=
-  s!"SELECT {s.selector.toString} FROM {s.fromTable} WHERE {s.condition.toString}"
+def JoinType.toString : JoinType → String
+  | .inner => "INNER"
+  | .outer => "OUTER"
 
-def Select.fromQuery {d : Database} {names : Std.HashSet d.Name} : Query d names → Select
+inductive JoinConnect where
+  | onCondition (cond : Expr)
+  | usingColumn (column : String) (columns : List String)
+  deriving Repr
+
+def JoinConnect.toString : JoinConnect → String
+  | .onCondition cond =>
+    s!"ON {cond.toString}"
+  | .usingColumn column columns =>
+    s!"USING {column}{" , ".intercalate columns}"
+
+mutual
+
+inductive From where
+  | tableName (name : String) (alias : Option String)
+  | select (sel : Select) (alias : Option String)
+  | join (left right : From) (joinType : JoinType) (connect : JoinConnect)
+  | naturalJoin (left right : From) (joinType : JoinType)
+  | crossJoin (left right : From)
+  deriving Repr
+
+structure Select where
+  selector : Selector
+  from_ : From
+  condition : Expr
+  deriving Repr
+
+end
+
+mutual
+
+partial def From.toString : From → String
+  | .tableName name (.some alias) =>
+    s!"{name} AS {alias}"
+  | .tableName name none =>
+    s!"{name}"
+  | .select select (.some alias) =>
+    s!"( {select.toString} ) AS {alias}"
+  | .select select none =>
+    s!"( {select.toString} )"
+  | .join left right joinType connect =>
+    s!"{left.toString} {joinType.toString} {right.toString} {connect.toString}"
+  | .naturalJoin left right joinType =>
+    s!"{left.toString} NATURAL {joinType.toString} {right.toString}"
+  | .crossJoin left right =>
+    s!"{left.toString} CROSS JOIN {right.toString}"
+
+partial def Select.toString (s : Select) : String :=
+  s!"SELECT {s.selector.toString} FROM {s.from_.toString} WHERE {s.condition.toString}"
+
+end
+
+def Select.fromQuery {d : Database} {view : View d} (q : Query d view)
+    (within : View d := view)
+    (emb : view.Hom within := by exact View.Hom.id _) : Select :=
+  match q with
   | .all table =>
-    { selector := .fields (names.toList.map (fun n ↦ (n.toString, .fromName n)))
-      fromTable := ToString.toString table
+    letI tableDef := d.tables table
+    { selector :=
+        .fields
+          ((Enum.all tableDef.Index).toList.map fun idx : tableDef.Index ↦
+            (s!"{emb.map idx}", .fromName <| (Table.view _).name idx))
+      from_ := .tableName (ToString.toString table) none
       condition := .true }
-  | .filter q e =>
-    letI s := fromQuery q
+  | .filter e q =>
+    letI s := fromQuery q within emb
+    -- TODO: the names in the condition need to be fixed
     { s with condition := .and s.condition (.fromExpr e) }
+  | .join (s := view₁) (t := view₂) q₁ q₂ =>
+    letI s₁ : Select := .fromQuery q₁ (view₁.prod view₂) (View.sumInl _ _)
+    letI s₂ : Select := .fromQuery q₂ (view₁.prod view₂) (View.sumInr _ _)
+    { selector := .all
+      from_ := .crossJoin (.select s₁ none) (.select s₂ none)
+      condition := .true }
+  | .project (s := s) (t := view) projection query =>
+    letI select : Select := .fromQuery query
+    { selector :=
+        .fields
+          ((Enum.all view.Index).toList.map fun idx =>
+            (s!"{emb.map idx}", .var s!"{projection.map idx}"))
+      from_ :=
+        .select select none
+      condition := .true }
+    ---- TODO: this also needs to fix the names to match the names used by the view
+    --letI select : Select := .fromQuery query within (.comp projection emb)
+    --{ selector :=
+    --    .fields
+    --      ((Enum.all view.Index).toList.map fun idx ↦ (s!"{emb.map idx}", .fromName <| view.name idx))
+    --  from_ := select.from_
+    --  condition := select.condition }
 
 def interpretation : Interpretation Select where
   fromQuery _ := Select.fromQuery
@@ -93,7 +178,7 @@ def Insert.fromInsert {d : Database} {tableName : d.Index} (ins : d.Insert table
   intoTable := ToString.toString tableName
   values :=
     (Enum.all (d.tables tableName).Index).toList.map
-      fun colName => ⟨ToString.toString colName, .ofValue (ins.entry.values colName)⟩
+      fun colName => ⟨ToString.toString colName, .ofValue (ins.entry.value colName)⟩
 
 def Insert.toString (ins : Insert) : String :=
   s!"INSERT INTO {ins.intoTable} ({", ".intercalate (ins.values.map Prod.fst)}) VALUES ({", ".intercalate (ins.values.map fun x => x.2.toString)})"

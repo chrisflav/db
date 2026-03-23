@@ -41,16 +41,34 @@ elab "initialize_database" decl:ident : command => do
 
 initialize_database mydb
 
-def addTableToDatabase (table database : Name) (dbName : Option String := none) :
+def addTableToDatabase (tableInfo : TableInfo) (database : Name) :
     CommandElabM Unit := do
   let some tag ← getDatabaseTag? database |
     throwError s!"Database `{database}` does not exist."
   let auxDbDecl ← mkAuxDeclName
-  let newTables := tag.tables.push (table, dbName)
-  elabDatabase auxDbDecl newTables.toList
+  let newTables := tag.tables.push tableInfo
+  elabDatabase auxDbDecl (newTables.toList.map fun info => (info.tableDecl, info.tableName))
   addDatabaseTag database
     { databaseDecl := auxDbDecl
       tables := newTables }
+
+def updateHasModels (database : Name) : CommandElabM Unit := do
+  let some dbTag ← getDatabaseTag? database
+    | throwError "Database {database} does not exist."
+  for table in dbTag.tables do
+    if let some typeDecl := table.typeDecl? then
+    let auxModelDecl ← mkAuxDeclName
+    let modelStx ←
+      `(def $(mkIdent auxModelDecl) :
+            Model $(mkIdent dbTag.databaseDecl) $(mkIdent typeDecl) where
+          index := $(mkIdent (dbTag.databaseDecl.capitalize ++ `Index ++ table.tableDecl))
+          hasTable := inferInstanceAs <| HasTable _ $(mkIdent table.tableDecl))
+    elabCommand modelStx
+    let instStx ←
+      `(instance : HasModel $(mkIdent typeDecl) where
+          database := $(mkIdent dbTag.databaseDecl)
+          model := $(mkIdent auxModelDecl))
+    elabCommand instStx
 
 def addHasModel (tableTypeDecl database : Name) : CommandElabM Unit := do
   let tableDecl : Name := s!"{tableTypeDecl}Table".toName
@@ -74,8 +92,13 @@ def addHasModel (tableTypeDecl database : Name) : CommandElabM Unit := do
 
 elab "add_table" tableTypeDecl:ident " to " database:ident : command => do
   let tableDecl : Name := s!"{tableTypeDecl.getId}Table".toName
-  addTableToDatabase tableDecl database.getId
-  addHasModel tableTypeDecl.getId database.getId
+  let info : TableInfo :=
+    { tableDecl := tableDecl
+      typeDecl? := tableTypeDecl.getId
+      tableName := none }
+  addTableToDatabase info database.getId
+  -- addHasModel tableTypeDecl.getId database.getId
+  updateHasModels database.getId
 
 syntax (name := databaseTerm) "%database" ident : term
 
