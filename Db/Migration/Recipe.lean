@@ -34,7 +34,7 @@ theorem List.Nodup.finIdxOf?_getElem {α : Type u} [BEq α] [LawfulBEq α] {l : 
   refine ⟨rfl, fun j hj heq => ?_⟩
   suffices j = i by grind
   ext
-  apply List.getElem?_inj j.isLt h
+  apply (List.getElem?_inj j.isLt h).mp
   grind
 
 -- TODO: generalise by adding a `LawfulFromToString` class

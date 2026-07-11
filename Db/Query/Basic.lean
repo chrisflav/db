@@ -16,7 +16,7 @@ class Indexing (α : Type) : Type extends Enum α, Hashable α where
   fromString_toString (x : α) : FromString.fromString (ToString.toString x) = some x := by
     intro x; induction x <;> rfl
 
-attribute [instance] Indexing.toString Indexing.fromString Indexing.decidableEq
+attribute [reducible, instance] Indexing.toString Indexing.fromString Indexing.decidableEq
 attribute [simp, grind .] Indexing.fromString_toString
 
 theorem Indexing.injective_toString {α : Type} [Indexing α] :
@@ -42,7 +42,7 @@ class Disjoint (α β : Type) [Indexing α] [Indexing β] : Prop where
   fromString_eq_none_left (a : α) : (FromString.fromString (toString a) : Option β) = none
   fromString_eq_none_right (b : β) : (FromString.fromString (toString b) : Option α) = none
 
-def Indexing.sumOfDisjoint (α β : Type) [Indexing α] [Indexing β] [Disjoint α β] :
+@[reducible] def Indexing.sumOfDisjoint (α β : Type) [Indexing α] [Indexing β] [Disjoint α β] :
     Indexing (α ⊕ β) where
   length := Enum.length α + Enum.length β
   encoding :=
@@ -60,7 +60,7 @@ def Indexing.sumOfDisjoint (α β : Type) [Indexing α] [Indexing β] [Disjoint 
     · simp
     · simp [Disjoint.fromString_eq_none_right]
 
-def Indexing.sum (α β : Type) [Indexing α] [Indexing β] : Indexing (α ⊕ β) where
+@[reducible] def Indexing.sum (α β : Type) [Indexing α] [Indexing β] : Indexing (α ⊕ β) where
   length := Enum.length α + Enum.length β
   encoding :=
     (Equiv.sumCongr Enum.encoding Enum.encoding).trans finSumFinEquiv

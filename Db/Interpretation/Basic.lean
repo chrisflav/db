@@ -30,7 +30,7 @@ class DBMonadWithMigrations (m : Type → Type) where
 
 namespace DBMonadWithMigrations
 
-attribute [instance] DBMonadWithMigrations.dbMonad
+attribute [reducible, instance] DBMonadWithMigrations.dbMonad
 
 variable {m : Type → Type} [DBMonadWithMigrations m] [Monad m]
 

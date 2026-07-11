@@ -39,7 +39,7 @@ def fromDepEnum (name : Name) (expr : Array (Expr × Expr)) : MetaM Expr := do
       (#[some motive, some x] ++ (expr.map (Option.some ∘ Prod.fst)))
     Meta.mkLambdaFVars #[x] body
 
-def FromString.ofToString (α : Type) [ToString α] [Enum α] : FromString α where
+@[reducible] def FromString.ofToString (α : Type) [ToString α] [Enum α] : FromString α where
   fromString s := Id.run do
     let mut res : Option α := none
     for x in Enum.all α do

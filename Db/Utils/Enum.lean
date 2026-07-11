@@ -92,6 +92,7 @@ def elabInstance (expr : Expr) : CommandElabM Unit := do
       hints := default
       safety := .safe }
   liftCoreM <| addAndCompile instDecl
+  liftCoreM <| Lean.setReducibleAttribute instName
   liftTermElabM <| Meta.addInstance instName default 1000
 
 def deriveEnum (declNames : Array Name) : CommandElabM Bool := do
