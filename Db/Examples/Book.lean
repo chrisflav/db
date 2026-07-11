@@ -24,7 +24,19 @@ structure Book where
 
 open HasModel DBMonadWithMigrations
 
--- TODO: add query DSL, supporting join queries
+/-- All books written by a retired author, expressed with the query DSL. -/
+def booksByRetiredAuthors : QuerySet Book :=
+  query% do
+    let a ← from Author
+    let b ← from Book
+    guard b.author = a.name
+    guard a.retired
+    select b
+
+/-- The SQL generated for `booksByRetiredAuthors`. -/
+def booksByRetiredAuthorsSQL : String :=
+  (SQL.Select.fromQuery booksByRetiredAuthors.query).toString
+
 def test : IO Unit := do
   let mike : Author :=
     { name := v"Mike"
@@ -40,22 +52,7 @@ def test : IO Unit := do
   let drama : Book :=
     { title := v"A drama"
       author := lisa.name  }
-  let database := HasModel.database Author
-  let authorModel := HasModel.model Author
-  let bookModel := HasModel.model Book
-  /-
-  let q : QuerySet Book ← do
-    all where author.retired = true
-  -/
-  let q : QuerySet Book :=
-    { query :=
-      Query.project (View.sumInr _ _) <|
-      Query.filter (.eq (.var (Sum.inl AuthorIndex.retired) .bool) .true) <|
-      Query.filter
-        (.eq (.var (Sum.inl AuthorIndex.name) (.varchar 100))
-             (.var (Sum.inr BookIndex.author) (.varchar 100)))
-        (Query.join (.all <| authorModel.index) (.all <| bookModel.index)) }
-  -- IO.println (SQL.Select.fromQuery q).toString
+  let q : QuerySet Book := booksByRetiredAuthors
   let x : PostgreSQL.M (Array Book) := do
     -- Update database schema to target schema
     -- autoUpdate (%database mydb)

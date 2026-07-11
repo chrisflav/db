@@ -68,11 +68,11 @@ class Disjoint (α β : Type) [Indexing α] [Indexing β] : Prop where
     Sum.elim (fun a => s!"left__{ToString.toString a}")
       (fun a => s!"right__{ToString.toString a}")
   fromString.fromString s := do
-    if let some suffix := s.dropPrefix? "left__" then
-      let a : α ← FromString.fromString suffix.toString
+    if let some suffix := s.stripPrefix? "left__" then
+      let a : α ← FromString.fromString suffix
       return .inl a
-    else if let some suffix := s.dropPrefix? "right__" then
-      let a : β ← FromString.fromString suffix.toString
+    else if let some suffix := s.stripPrefix? "right__" then
+      let a : β ← FromString.fromString suffix
       return .inr a
     else
       none
@@ -81,8 +81,15 @@ class Disjoint (α β : Type) [Indexing α] [Indexing β] : Prop where
     Sum.elim hash hash
   fromString_toString x := by
     obtain (a | b) := x
-    · simp
-    · simp [String.dropPrefix?_append_of_ne]
+    · simp [Indexing.fromString_toString]
+    · have hne : ∀ r : String, "right__" ++ ToString.toString b ≠ "left__" ++ r := by
+        intro r h
+        have hl := congrArg String.toList h
+        rw [String.toList_append, String.toList_append] at hl
+        simp only [show "right__".toList = ['r', 'i', 'g', 'h', 't', '_', '_'] from by decide,
+          show "left__".toList = ['l', 'e', 'f', 't', '_', '_'] from by decide] at hl
+        simp at hl
+      simp [String.stripPrefix?_eq_none hne, Indexing.fromString_toString]
 
 inductive DBType where
   | bool : DBType

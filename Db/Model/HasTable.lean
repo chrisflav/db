@@ -62,44 +62,6 @@ instance [HasModel α] : HasView α where
   view := Table.view (HasModel.model _).index
   encoding := .trans HasTable.encoding (Table.entryViewEquiv _).symm
 
-section
-
-open Lean Meta Elab
-
-declare_syntax_cat query
-
-syntax (name := queryQuote) "query%" query : term
-
-end
-
-structure QueryM (key : Type) : Type where
-
-namespace QueryM
-
-instance : Monad QueryM where
-  pure _ := {}
-  bind _ _ := {}
-
-def all (α : Type) : QueryM α where
-
-def guard (_p : Prop) : QueryM Unit where
-
-def query (α β : Type) : QueryM (α × β) := do
-  let book : α ← .all α
-  let author : β ← .all β
-  return (book, author)
-
-/-
-def query : Query ... := do
-  let book : Book ← .all Book
-  let author : Author ← .all Author
-  guard book.author = author.name
-  guard author.expired = True
-  return book
--/
-
-end QueryM
-
 namespace QuerySet
 
 variable {α : Type} [HasModel α]
