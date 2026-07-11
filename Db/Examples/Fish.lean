@@ -131,7 +131,6 @@ structure Many (α : Type) : Type where
 class HasKey (α : Type) where
   Key : Type
   key : α → Key
-  -- key_injective {x y : α} (h : key x = key y) : x = y
 
 export HasKey (Key)
 
