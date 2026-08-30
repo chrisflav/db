@@ -106,44 +106,129 @@ private def columnVar (ctx : Context) (bidx : Nat) (field : Name) : TermElabM (E
     #[← mkAppM ``Database.Name.column #[← mkAppM ``View.name #[b.view, ctor]]])
   -- Inject the column index into the total view.
   let idx ← mkAppM ``View.Hom.map #[ctx.injs[bidx]!, ctor]
-  let e ← mkAppOptM ``DBExpr.var #[some ctx.db, some ctx.view, some idx, some t]
+  -- `DBExpr.var` demands that `t` really is the type the view assigns to the column; `t` was
+  -- computed from exactly that expression just above, so `rfl` proves it.
+  let e ← mkAppOptM ``DBExpr.var
+    #[some ctx.db, some ctx.view, some idx, some t, some (← mkEqRefl t)]
   return (e, t)
+
+/-- The proof that a `DBType` is character data, for the concrete types the DSL produces. -/
+private def mkTextLikeProof : TermElabM Expr :=
+  mkEqRefl (Lean.mkConst ``Bool.true)
+
+/-- Inside a `query% do` block, `like col pattern` is SQL's `col LIKE pattern`, where `%` and `_`
+in `pattern` are wildcards. It has no meaning outside a query block. -/
+def like {n : Nat} (_col : VarChar n) (_pattern : String) : Bool := false
+
+/-- Inside a `query% do` block, `contains col s` matches the rows whose `col` contains `s` as a
+substring, i.e. `col LIKE '%s%'` with the wildcards occurring in `s` escaped. It has no meaning
+outside a query block. -/
+def contains {n : Nat} (_col : VarChar n) (_s : String) : Bool := false
+
+/-- Inside a `query% do` block, `isIn col [v₁, ..., vₙ]` is SQL's `col IN (v₁, ..., vₙ)`. It has no
+meaning outside a query block. -/
+def isIn {α : Type} (_col : α) (_values : List α) : Bool := false
 
 mutual
 
-/-- Translate an elaborated term into a `DBExpr ctx.view t`, returning the pair `(expr, t)`.
+/-- Translate an elaborated term into a `DBExpr ctx.db ctx.view t`, returning the pair `(expr, t)`.
 
 The term was produced by elaborating a `guard`/`select` sub-expression against the local
 variables standing for the bound tables, so column references appear as ordinary structure
 projections (`Book.author b`), string literals as `VarChar.mk`, and the boolean connectives as
 `Eq`/`And`/`Bool.and`. -/
 private partial def transVal (ctx : Context) (e : Expr) : TermElabM (Expr × Expr) := do
-  -- Equality of two values (also covers the `Bool → Prop` coercion `x = true`).
-  if e.isAppOfArity ``Eq 3 then
-    let args := e.getAppArgs
-    let (l, tl) ← transVal ctx args[1]!
-    let (r, tr) ← transVal ctx args[2]!
+  let args := e.getAppArgs
+  -- Apply a `DBExpr` constructor; its database and view arguments are implicit and are
+  -- determined by the sub-expressions.
+  let mkE (ctor : Name) (as : Array Expr) : TermElabM Expr :=
+    mkAppM ctor as
+  -- A comparison of two values of the same type, yielding a boolean condition.
+  let cmp (ctor : Name) (l r : Expr) : TermElabM (Expr × Expr) := do
+    let (l, tl) ← transVal ctx l
+    let (r, tr) ← transVal ctx r
     unless ← isDefEq tl tr do
       throwError m!"cannot compare a value of type `{← reduce tl}` with one of type `{← reduce tr}`"
-    return (← mkAppM ``DBExpr.eq #[l, r], ctx.boolTy)
+    return (← mkE ctor #[l, r], ctx.boolTy)
+  -- Equality of two values (also covers the `Bool → Prop` coercion `x = true`).
+  if e.isAppOfArity ``Eq 3 then
+    return ← cmp ``DBExpr.eq args[1]! args[2]!
+  -- Disequality, either as `a ≠ b` or as `a != b`.
+  if e.isAppOfArity ``Ne 3 then
+    return ← cmp ``DBExpr.ne args[1]! args[2]!
+  if e.isAppOfArity ``bne 4 then
+    return ← cmp ``DBExpr.ne args[2]! args[3]!
+  if e.isAppOfArity ``BEq.beq 4 then
+    return ← cmp ``DBExpr.eq args[2]! args[3]!
+  -- Ordering comparisons. `a > b` and `a ≥ b` are their own head constants in Lean, so both
+  -- orientations have to be recognised.
+  if e.isAppOfArity ``LT.lt 4 then
+    return ← cmp ``DBExpr.lt args[2]! args[3]!
+  if e.isAppOfArity ``LE.le 4 then
+    return ← cmp ``DBExpr.le args[2]! args[3]!
+  if e.isAppOfArity ``GT.gt 4 then
+    return ← cmp ``DBExpr.gt args[2]! args[3]!
+  if e.isAppOfArity ``GE.ge 4 then
+    return ← cmp ``DBExpr.ge args[2]! args[3]!
   -- Conjunction, either as a proposition (`∧`) or on booleans (`&&`).
-  if e.isAppOfArity ``And 2 || e.isAppOfArity ``Bool.and 2 then
-    let args := e.getAppArgs
-    return (← mkAppM ``DBExpr.and #[← transBool ctx args[0]!, ← transBool ctx args[1]!], ctx.boolTy)
+  if e.isAppOfArity ``And 2 then
+    return (← mkE ``DBExpr.and #[← transBool ctx args[0]!, ← transBool ctx args[1]!], ctx.boolTy)
+  if e.isAppOfArity ``Bool.and 2 then
+    return (← mkE ``DBExpr.and #[← transBool ctx args[0]!, ← transBool ctx args[1]!], ctx.boolTy)
+  -- Disjunction, either as a proposition (`∨`) or on booleans (`||`).
+  if e.isAppOfArity ``Or 2 then
+    return (← mkE ``DBExpr.or #[← transBool ctx args[0]!, ← transBool ctx args[1]!], ctx.boolTy)
+  if e.isAppOfArity ``Bool.or 2 then
+    return (← mkE ``DBExpr.or #[← transBool ctx args[0]!, ← transBool ctx args[1]!], ctx.boolTy)
+  -- Negation, either as a proposition (`¬`) or on booleans (`!`).
+  if e.isAppOfArity ``Not 1 then
+    return (← mkE ``DBExpr.not #[← transBool ctx args[0]!], ctx.boolTy)
+  if e.isAppOfArity ``Bool.not 1 then
+    return (← mkE ``DBExpr.not #[← transBool ctx args[0]!], ctx.boolTy)
+  -- Null tests, written on the `Option`-valued field of a nullable column.
+  if e.isAppOfArity ``Option.isNone 2 then
+    return (← mkE ``DBExpr.isNull #[(← transVal ctx args[1]!).1], ctx.boolTy)
+  if e.isAppOfArity ``Option.isSome 2 then
+    return (← mkE ``DBExpr.isNotNull #[(← transVal ctx args[1]!).1], ctx.boolTy)
+  -- `LIKE`, `LIKE '%s%'` and `IN (...)`, which have no Lean surface syntax of their own and are
+  -- written with the marker functions of this module.
+  if e.isAppOfArity ``Db.Query.DSL.like 3 then
+    let (l, tl) ← transVal ctx args[1]!
+    return (← mkAppOptM ``DBExpr.like
+      #[some ctx.db, some ctx.view, some tl, some l, some args[2]!, some (← mkTextLikeProof)],
+      ctx.boolTy)
+  if e.isAppOfArity ``Db.Query.DSL.contains 3 then
+    let (l, tl) ← transVal ctx args[1]!
+    return (← mkAppOptM ``DBExpr.contains
+      #[some ctx.db, some ctx.view, some tl, some l, some args[2]!, some (← mkTextLikeProof)],
+      ctx.boolTy)
+  if e.isAppOfArity ``Db.Query.DSL.isIn 3 then
+    let (l, tl) ← transVal ctx args[1]!
+    return (← mkAppOptM ``DBExpr.inList
+      #[some ctx.db, some ctx.view, some tl, some l, some args[2]!], ctx.boolTy)
+  -- A nullable column projects to an `Option`-valued field, so a comparison against a literal is
+  -- written `col = some v`. `DBExpr` does not track nullability, so `some` is simply dropped. There
+  -- is deliberately no case for `none`: `col = NULL` is never true in SQL, `col.isNone` is meant.
+  if e.isAppOfArity ``Option.some 2 then
+    return ← transVal ctx args[1]!
   if e.isConstOf ``True || e.isConstOf ``Bool.true then
     return (← mkAppOptM ``DBExpr.true #[some ctx.db, some ctx.view], ctx.boolTy)
   if e.isConstOf ``False || e.isConstOf ``Bool.false then
     return (← mkAppOptM ``DBExpr.false #[some ctx.db, some ctx.view], ctx.boolTy)
-  -- A string literal, written `v"..."`.
-  if e.getAppFn.isConstOf ``VarChar.mk then
-    let n := (← inferType e).getAppArgs[0]!
-    let t := mkApp (mkConst ``DBType.varchar) n
-    return (← mkAppOptM ``DBExpr.str #[some ctx.db, some ctx.view, some n, some e], t)
   -- A column reference: a structure projection `T.field x` applied to a bound variable `x`.
-  let args := e.getAppArgs
   if e.getAppFn.isConst && !args.isEmpty && args.back!.isFVar then
     if let some bidx := ctx.fvarIdx.get? args.back!.fvarId! then
       return ← columnVar ctx bidx (Name.mkSimple e.getAppFn.constName!.getString!)
+  -- Anything else that has the type of a database value is a constant of the query: it is
+  -- evaluated when the query is built and embedded as a literal.
+  let ty ← whnf (← inferType e)
+  if ty.isAppOfArity ``VarChar 1 then
+    let n := ty.appArg!
+    let t := mkApp (mkConst ``DBType.varchar) n
+    return (← mkAppOptM ``DBExpr.str #[some ctx.db, some ctx.view, some n, some e], t)
+  if ty.isConstOf ``Int then
+    return (← mkAppOptM ``DBExpr.int #[some ctx.db, some ctx.view, some e],
+      Lean.mkConst ``DBType.int)
   throwError m!"unsupported expression in query condition: `{e}`"
 
 /-- Translate a term that is expected to denote a boolean condition. -/

@@ -22,6 +22,8 @@ structure Author where
 structure Book where
   title : VarChar 200
   author : VarChar 100
+  /-- The year of publication, unknown for some books. -/
+  year : Option Int
   deriving Repr
 
 open HasModel DBMonadWithMigrations
@@ -39,10 +41,12 @@ def lisa : Author where
 def novel : Book where
   title := v"Best novel ever!"
   author := mike.name
+  year := some 1998
 
 def drama : Book where
   title := v"A drama"
   author := lisa.name
+  year := none
 
 def test : IO Unit := do
   let x : PostgreSQL.M (Array Book) := do

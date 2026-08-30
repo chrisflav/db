@@ -236,23 +236,11 @@ def View.sumInr {d : Database} (view₁ view₂ : View d) : Hom view₂ (view₁
   map := Sum.inr
   name_map _ := rfl
 
-inductive DBExpr {d : Database} (view : View d) : DBType → Type 1 where
-  | true : DBExpr view .bool
-  | false : DBExpr view .bool
-  | and (e₁ e₂ : DBExpr view .bool) : DBExpr view .bool
-  | eq {t : DBType} (e₁ e₂ : DBExpr view t) : DBExpr view .bool
-  | var (i : view.Index) (t : DBType) : DBExpr view t
-  | str {n : Nat} (s : VarChar n) : DBExpr view (.varchar n)
-
 def Database.Name.column {d : Database} : d.Name → Column
   | .ident i => i.column
   | .computation _ t =>
     { type := t
       nullable := false }
-
-@[ext]
-structure View.Entry {d : Database} (view : View d) : Type where
-  value (idx : view.Index) : (view.name idx).column.Value
 
 def Database.Name.dbtype {d : Database} : d.Name → DBType
   | .ident i => i.dbtype
@@ -261,6 +249,10 @@ def Database.Name.dbtype {d : Database} : d.Name → DBType
 def Database.Name.toString {d : Database} : d.Name → String
   | .ident i => i.toString
   | .computation s _ => s
+
+@[ext]
+structure View.Entry {d : Database} (view : View d) : Type where
+  value (idx : view.Index) : (view.name idx).column.Value
 
 def Table.names {d : Database} (tname : d.Index) :
     Std.HashSet d.Name :=
@@ -278,6 +270,70 @@ def Table.entryViewEquiv {d : Database} (tableName : d.Index) :
   toFun e := { value idx := e.value idx }
   invFun e := { value idx := e.value idx }
 
+/-- Whether values of a type are character data, and hence comparable with SQL's `LIKE`. -/
+def DBType.isTextLike : DBType → Bool
+  | .varchar _ => true
+  | _ => false
+
+mutual
+
+/--
+A typed expression over the columns of `view`.
+
+A `DBExpr` is pure syntax: it carries no semantics of its own and is translated to SQL by the
+backends. In particular SQL's three-valued logic is not modelled here; `NULL` propagates through
+the comparisons exactly as the target database defines it, which is why `isNull` rather than
+`eq _ (null _)` is the way to test for `NULL`.
+-/
+inductive DBExpr (d : Database) : View d → DBType → Type 1 where
+  /-- The literal `TRUE`. -/
+  | true {view : View d} : DBExpr d view .bool
+  /-- The literal `FALSE`. -/
+  | false {view : View d} : DBExpr d view .bool
+  /-- Conjunction, `AND`. -/
+  | and {view : View d} (e₁ e₂ : DBExpr d view .bool) : DBExpr d view .bool
+  /-- Disjunction, `OR`. -/
+  | or {view : View d} (e₁ e₂ : DBExpr d view .bool) : DBExpr d view .bool
+  /-- Negation, `NOT`. -/
+  | not {view : View d} (e : DBExpr d view .bool) : DBExpr d view .bool
+  /-- Equality, `=`. -/
+  | eq {view : View d} {t : DBType} (e₁ e₂ : DBExpr d view t) : DBExpr d view .bool
+  /-- Disequality, `<>`. -/
+  | ne {view : View d} {t : DBType} (e₁ e₂ : DBExpr d view t) : DBExpr d view .bool
+  /-- Strictly less than, `<`. -/
+  | lt {view : View d} {t : DBType} (e₁ e₂ : DBExpr d view t) : DBExpr d view .bool
+  /-- Less than or equal, `<=`. -/
+  | le {view : View d} {t : DBType} (e₁ e₂ : DBExpr d view t) : DBExpr d view .bool
+  /-- Strictly greater than, `>`. -/
+  | gt {view : View d} {t : DBType} (e₁ e₂ : DBExpr d view t) : DBExpr d view .bool
+  /-- Greater than or equal, `>=`. -/
+  | ge {view : View d} {t : DBType} (e₁ e₂ : DBExpr d view t) : DBExpr d view .bool
+  /-- `IS NULL`. -/
+  | isNull {view : View d} {t : DBType} (e : DBExpr d view t) : DBExpr d view .bool
+  /-- `IS NOT NULL`. -/
+  | isNotNull {view : View d} {t : DBType} (e : DBExpr d view t) : DBExpr d view .bool
+  /-- Pattern match, `LIKE`. The pattern is a raw SQL `LIKE` pattern, so `%` and `_` in it are
+  wildcards; use `DBExpr.likeEscape` to match them literally. -/
+  | like {view : View d} {t : DBType} (e : DBExpr d view t) (pattern : String)
+      (h : t.isTextLike := by decide) : DBExpr d view .bool
+  /-- Membership in a literal list of values, `IN (v₁, ..., vₙ)`. An empty list is `FALSE`. -/
+  | inList {view : View d} {t : DBType} (e : DBExpr d view t) (values : List t.Value) :
+      DBExpr d view .bool
+  /-- Membership in the `col` column of a subquery, `IN (SELECT col FROM ...)`. The column has to
+  have the same type as `e`, which for a literal index is checked by the default `rfl`. -/
+  | inSubquery {view sub : View d} {t : DBType} (e : DBExpr d view t) (q : Query d sub)
+      (col : sub.Index) (h : (sub.name col).dbtype = t := by rfl) : DBExpr d view .bool
+  /-- The column named by `i`. Its `DBType` has to be the one the view assigns to `i`, which for a
+  literal index is checked by the default `rfl`. -/
+  | var {view : View d} (i : view.Index) (t : DBType)
+      (h : (view.name i).dbtype = t := by rfl) : DBExpr d view t
+  /-- A string literal. -/
+  | str {view : View d} {n : Nat} (s : VarChar n) : DBExpr d view (.varchar n)
+  /-- An integer literal. -/
+  | int {view : View d} (n : Int) : DBExpr d view .int
+  /-- The literal `NULL`, at a given type. -/
+  | null {view : View d} (t : DBType) : DBExpr d view t
+
 /--
 A query on the database `d` indexed over the (unique) names of the outputs.
 -/
@@ -285,7 +341,7 @@ inductive Query (d : Database) : View d → Type 1 where
   /-- All rows of a table. -/
   | all (table : d.Index) : Query d (Table.view table)
   /-- Filter a query by a condition. -/
-  | filter {view : View d} (e : DBExpr view .bool) (q : Query d view) : Query d view
+  | filter {view : View d} (e : DBExpr d view .bool) (q : Query d view) : Query d view
   /--
   Cross join (cartesian product). All other join operations can be obtained combining this
   with the appropriate filter condition.
@@ -293,6 +349,18 @@ inductive Query (d : Database) : View d → Type 1 where
   | join {s t : View d} (q₁ : Query d s) (q₂ : Query d t) : Query d (s.prod t)
   -- Example: `Query d (s.prod t) -> Query d s`
   | project {s t : View d} (p : t.Hom s) (q₁ : Query d s) : Query d t
+
+end
+
+/-- Escape the SQL `LIKE` wildcards `%` and `_` in `s`, so that a pattern built from it matches
+them literally. The escape character is `\`, which `DBExpr.like` declares to the backend. -/
+def DBExpr.likeEscape (s : String) : String :=
+  s.replace "\\" "\\\\" |>.replace "%" "\\%" |>.replace "_" "\\_"
+
+/-- `e LIKE '%s%'`, matching rows in which `s` occurs as a substring. -/
+def DBExpr.contains {d : Database} {view : View d} {t : DBType} (e : DBExpr d view t) (s : String)
+    (h : t.isTextLike := by decide) : DBExpr d view .bool :=
+  .like e s!"%{DBExpr.likeEscape s}%" h
 
 def signature {d : Database} (s : Std.HashSet d.Name) : Std.HashMap d.Name DBType :=
   s.inner.map (fun n _ ↦ n.dbtype)

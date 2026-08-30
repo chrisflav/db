@@ -62,7 +62,7 @@ example : nameIdent.dbtype.Value := (3 : Int)
 
 def q := SQL.Select.fromQuery (d := database) <|
   .filter
-    (.eq (.var FishIndex.length (.varchar 100)) (.str ⟨"Swordfish", by decide⟩))
+    (.eq (.var FishIndex.name (.varchar 100)) (.str ⟨"Swordfish", by decide⟩))
     (.all DatabaseIndex.fish)
 
 def ins : SQL.Insert where
@@ -163,7 +163,7 @@ def test : IO Unit := do
         | .length => (56 : Int) }
   let q : Query database _ :=
     .filter
-      (.eq (.var FishIndex.length (.varchar 100)) (.str ⟨"Aal", by decide⟩))
+      (.eq (.var FishIndex.name (.varchar 100)) (.str ⟨"Aal", by decide⟩))
       (.all DatabaseIndex.fish)
   let x : PostgreSQL.M _ := do
     _ ← DBMonad.insert ins
