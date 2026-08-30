@@ -11,9 +11,10 @@ import Db.Model
 /-!
 # SQLite backend
 
-This module provides a database backend backed by [`leansqlite`](https://github.com/leanprover/leansqlite),
-the official Lean bindings for SQLite. It mirrors the PostgreSQL backend: the typed queries are
-turned into SQL strings by `Db.Backends.Sql` and executed through the SQLite C bindings.
+This module provides a database backend backed by
+[`leansqlite`](https://github.com/leanprover/leansqlite), the official Lean bindings for SQLite.
+It mirrors the PostgreSQL backend: the typed queries are turned into SQL strings by
+`Db.Backends.Sql` and executed through the SQLite C bindings.
 
 The backend runs in the `Sqlite.M` monad, a thin reader over an open `SQLite` connection. Because
 SQLite is embedded (the amalgamation is bundled by `leansqlite`), no external database server is
@@ -23,17 +24,19 @@ Two things differ from PostgreSQL and are handled here:
 
 * Schema introspection uses `sqlite_master` joined with `pragma_table_info`, rather than
   `information_schema.columns` (which SQLite does not have).
-* `ALTER TABLE` in SQLite supports only one change per statement and cannot change a column's type or
-  nullability at all. So `execute` emits one statement per add/drop/rename command, and realises a
-  type or nullability change by rebuilding the table (create a new table with the target schema, copy
-  the data over, drop the old table, and rename the new one into place) inside a transaction.
+* `ALTER TABLE` in SQLite supports only one change per statement, cannot change a column's type or
+  nullability at all, and cannot add a `NOT NULL` column. So `execute` emits one statement per
+  command where SQLite supports it, and otherwise rebuilds the table (create a new table with the
+  target schema, copy the data over, drop the old table, rename the new one into place, and
+  re-create the indexes and triggers that `DROP TABLE` took with it) inside a transaction.
 -/
 
 namespace Sqlite
 
 open scoped SQLite
 
-/-- The SQLite backend monad: a reader over an open connection. Errors surface as `IO` exceptions. -/
+/-- The SQLite backend monad: a reader over an open connection. Errors surface as `IO`
+exceptions. -/
 abbrev M := ReaderT SQLite IO
 
 /-- Run a SQLite computation against the database at `path` (use `":memory:"` for an in-memory
@@ -109,54 +112,104 @@ def parseDBType (s : String) : Option DBType :=
   else
     none
 
-/-- A column as tracked while rebuilding a table: `(name, declared type, NOT NULL, source name)`.
-`source` is the column's name in the *existing* table (used to copy its data across the rebuild) or
-`none` for a freshly added column, which has no data to preserve. -/
-abbrev RebuildColumn := String × String × Bool × Option String
+/-- A column as tracked while rebuilding a table. -/
+structure RebuildColumn where
+  name : String
+  /-- The declared type, as SQLite reports and accepts it. -/
+  type : String
+  notNull : Bool
+  /-- The column's 1-based position in the table's `PRIMARY KEY`, or `0` if it is not part of it. -/
+  primaryKey : Nat
+  /-- The column's name in the *existing* table, whose data is copied across the rebuild, or `none`
+  for a freshly added column, which has no data to preserve. -/
+  source : Option String
 
 /-- Introspect the current columns of `tableName`, in definition order, as `RebuildColumn`s whose
 `source` is their own name (they all exist and their data must be preserved). -/
 def currentColumns (tableName : String) : M (Array RebuildColumn) := do
-  let rows ← query
-    s!"SELECT name AS nm, type AS ty, [notnull] AS nn FROM pragma_table_info('{tableName}') ORDER BY cid"
+  let rows ← query <|
+    s!"SELECT name AS nm, type AS ty, [notnull] AS nn, pk FROM pragma_table_info('{tableName}') " ++
+    "ORDER BY cid"
   return rows.filterMap fun row =>
     match row.get? "nm", row.get? "ty" with
-    | some n, some ty => some (n, ty, row.getD "nn" "0" == "1", some n)
+    | some n, some ty =>
+      some { name := n, type := ty, notNull := row.getD "nn" "0" == "1"
+             primaryKey := (row.getD "pk" "0").toNat?.getD 0, source := some n }
     | _, _ => none
+
+/-- The `CREATE INDEX`/`CREATE TRIGGER` statements of every index and trigger attached to
+`tableName`. `DROP TABLE` destroys these, so a rebuild has to re-run them afterwards. Indexes SQLite
+creates itself for a `PRIMARY KEY` or `UNIQUE` constraint have no statement of their own and are not
+listed here; see `unrecoverableConstraints`. -/
+def auxiliaryObjects (tableName : String) : M (Array String) := do
+  let rows ← query <|
+    s!"SELECT sql FROM sqlite_master WHERE tbl_name = '{tableName}' " ++
+    "AND type IN ('index', 'trigger') AND sql IS NOT NULL"
+  return rows.filterMap (·.get? "sql")
+
+/-- The names of `UNIQUE` constraints of `tableName` that a rebuild cannot reproduce. A `UNIQUE`
+constraint written inside `CREATE TABLE` is backed by an index SQLite generated itself, so it has no
+statement to re-run and is not visible in `pragma_table_info` either; rebuilding the table would
+drop it silently. A `PRIMARY KEY` is exempt: `currentColumns` recovers it from `pragma_table_info`.
+-/
+def unrecoverableConstraints (tableName : String) : M (Array String) := do
+  let rows ← query <|
+    s!"SELECT il.name AS nm FROM pragma_index_list('{tableName}') il " ++
+    "LEFT JOIN sqlite_master m ON m.name = il.name AND m.type = 'index' " ++
+    "WHERE il.origin = 'u' AND m.sql IS NULL"
+  return rows.filterMap (·.get? "nm")
 
 open SQL.Migration in
 /-- Apply one `ALTER TABLE` command to the working column list of a table rebuild. -/
 def applyAlterCommand (cols : Array RebuildColumn) : AlterTableCommand → Array RebuildColumn
-  | .addColumn field => cols.push (field.name, field.type, !field.nullable, none)
-  | .dropColumn name => cols.filter fun (n, _, _, _) => n != name
-  | .renameColumn old new =>
-    cols.map fun (n, ty, nn, src) => if n == old then (new, ty, nn, src) else (n, ty, nn, src)
+  | .addColumn field =>
+    cols.push { name := field.name, type := field.type, notNull := !field.nullable
+                primaryKey := 0, source := none }
+  | .dropColumn name => cols.filter fun c => c.name != name
+  | .renameColumn old new => cols.map fun c => if c.name == old then { c with name := new } else c
   | .alterColumn name (.setType ty) =>
-    cols.map fun (n, t, nn, src) => if n == name then (n, ty, nn, src) else (n, t, nn, src)
+    cols.map fun c => if c.name == name then { c with type := ty } else c
   | .alterColumn name (.setNullable nullable) =>
-    cols.map fun (n, t, nn, src) => if n == name then (n, t, !nullable, src) else (n, t, nn, src)
+    cols.map fun c => if c.name == name then { c with notNull := !nullable } else c
 
 open SQL.Migration in
 /-- Rebuild `tableName` to the schema obtained by applying `commands` to its current columns. SQLite
-does not support `ALTER COLUMN`, so type and nullability changes are realised by the standard
-create/copy/drop/rename dance, run inside a transaction so it is all-or-nothing. -/
+supports neither `ALTER COLUMN` nor adding a `NOT NULL` column, so those changes are realised by the
+standard create/copy/drop/rename dance, run inside a transaction so it is all-or-nothing.
+
+`DROP TABLE` also drops the table's indexes and triggers, so they are captured beforehand and
+re-created afterwards, and the `PRIMARY KEY` is carried over from `pragma_table_info`. A `UNIQUE`
+constraint written inside the original `CREATE TABLE` cannot be recovered this way, so rather than
+dropping it silently the rebuild refuses to run. -/
 def rebuildTable (tableName : String) (commands : List AlterTableCommand) : M Unit := do
   let db ← read
+  let unrecoverable ← unrecoverableConstraints tableName
+  unless unrecoverable.isEmpty do
+    throw <| IO.userError <|
+      s!"SQLite backend: cannot rebuild table `{tableName}`, as it has UNIQUE constraint(s) " ++
+      s!"({", ".intercalate unrecoverable.toList}) declared in its `CREATE TABLE` statement, " ++
+      "which the rebuild would silently drop. Migrate this table by hand."
   let current ← currentColumns tableName
+  let aux ← auxiliaryObjects tableName
   let newCols := commands.foldl applyAlterCommand current
-  let fieldDefs := newCols.toList.map fun (n, ty, nn, _) =>
-    s!"{n} {ty}{if nn then " NOT NULL" else ""}"
+  let fieldDefs := newCols.toList.map fun c =>
+    s!"{c.name} {c.type}{if c.notNull then " NOT NULL" else ""}"
+  let pkCols := (newCols.toList.filter (·.primaryKey > 0)).mergeSort
+    (fun c₁ c₂ => c₁.primaryKey ≤ c₂.primaryKey) |>.map (·.name)
+  let constraints := if pkCols.isEmpty then [] else [s!"PRIMARY KEY ({", ".intercalate pkCols})"]
   -- Columns present both before and after keep their data; match old name → new name.
-  let copyPairs := newCols.toList.filterMap fun (n, _, _, src) => src.map (·, n)
+  let copyPairs := newCols.toList.filterMap fun c => c.source.map (·, c.name)
   let newNames := ", ".intercalate (copyPairs.map (·.2))
   let oldNames := ", ".intercalate (copyPairs.map (·.1))
   let tmp := s!"__db_migrate_{tableName}"
   db.transaction do
-    db.exec s!"CREATE TABLE {tmp} (\n  {",\n  ".intercalate fieldDefs}\n)"
+    db.exec s!"CREATE TABLE {tmp} (\n  {",\n  ".intercalate (fieldDefs ++ constraints)}\n)"
     unless copyPairs.isEmpty do
       db.exec s!"INSERT INTO {tmp} ({newNames}) SELECT {oldNames} FROM {tableName}"
     db.exec s!"DROP TABLE {tableName}"
     db.exec s!"ALTER TABLE {tmp} RENAME TO {tableName}"
+    for sql in aux do
+      db.exec sql
 
 instance : DBMonadWithMigrations M where
   currentDatabase := do
@@ -169,12 +222,17 @@ instance : DBMonadWithMigrations M where
     let mut tables : Std.HashMap String TableRecipe := ∅
     for row in rows do
       if let (some tbl, some col, some ty) := (row.get? "tbl", row.get? "col", row.get? "ty") then
-        if let some dbtype := parseDBType ty then
-          -- `notnull` is `1` for a `NOT NULL` column, `0` otherwise.
-          let nullable := row.getD "nn" "0" == "0"
-          let column : Column := { type := dbtype, nullable := nullable }
-          let existing := (tables.getD tbl { columns := ∅ }).columns
-          tables := tables.insert tbl { columns := existing.insert col column }
+        -- Skipping a column we cannot represent would make the reported schema disagree with the
+        -- database, and the migration derived from it would then fail against the real table.
+        let some dbtype := parseDBType ty
+          | throw <| IO.userError <|
+              s!"SQLite backend: column `{col}` of table `{tbl}` has type `{ty}`, which has no " ++
+              "`DBType` counterpart, so the current schema cannot be represented."
+        -- `notnull` is `1` for a `NOT NULL` column, `0` otherwise.
+        let nullable := row.getD "nn" "0" == "0"
+        let column : Column := { type := dbtype, nullable := nullable }
+        let existing := (tables.getD tbl { columns := ∅ }).columns
+        tables := tables.insert tbl { columns := existing.insert col column }
     return { tables := tables }
   execute op := do
     let db ← read
@@ -183,10 +241,16 @@ instance : DBMonadWithMigrations M where
     | .dropTable cmd => db.exec cmd.toString
     | .renameTable cmd => db.exec cmd.toString
     | .alterTable cmd =>
-      -- SQLite cannot change a column's type or nullability in place. If any command does so, rebuild
-      -- the table (which also applies any add/drop/rename in the same operation). Otherwise SQLite
-      -- supports the changes directly, one statement per command.
-      if cmd.commands.any fun c => match c with | .alterColumn .. => true | _ => false then
+      -- SQLite cannot change a column's type or nullability in place, and rejects `ADD COLUMN`
+      -- with `NOT NULL` (it would have to fill the existing rows with `NULL`). If any command does
+      -- one of those, rebuild the table, which also applies the remaining commands of the same
+      -- operation. Otherwise SQLite supports the changes directly, one statement per command.
+      let needsRebuild := cmd.commands.any fun c =>
+        match c with
+        | .alterColumn .. => true
+        | .addColumn field => !field.nullable
+        | _ => false
+      if needsRebuild then
         rebuildTable cmd.tableName cmd.commands
       else
         for command in cmd.commands do
