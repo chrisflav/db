@@ -275,6 +275,86 @@ def DBType.isTextLike : DBType → Bool
   | .varchar _ => true
   | _ => false
 
+/-- The direction of one `ORDER BY` key. -/
+inductive SortDirection where
+  | asc
+  | desc
+  deriving DecidableEq, Repr
+
+/-- One `ORDER BY` key: a column of the view, and the direction to sort it in.
+
+Sorting is by column rather than by arbitrary expression; that is what the backends need and it
+keeps the key independent of `DBExpr`. -/
+structure SortKey {d : Database} (view : View d) where
+  column : view.Index
+  direction : SortDirection := .asc
+
+/-- An aggregate function of one column. -/
+inductive AggregateFn where
+  | count
+  | countDistinct
+  | sum
+  | min
+  | max
+  deriving DecidableEq, Repr
+
+/-- The name under which an aggregate function is applied in SQL. -/
+def AggregateFn.toString : AggregateFn → String
+  | .count | .countDistinct => "COUNT"
+  | .sum => "SUM"
+  | .min => "MIN"
+  | .max => "MAX"
+
+/-- Whether the aggregate applies to the distinct values of its column. -/
+def AggregateFn.distinct : AggregateFn → Bool
+  | .countDistinct => true
+  | _ => false
+
+/-- How one output column of an aggregate query is computed from the columns of its source. -/
+inductive AggregateEntry {d : Database} (source : View d) : Type where
+  /-- A column that is grouped over. It is selected as is and appears in `GROUP BY`. -/
+  | group (col : source.Index)
+  /-- `COUNT(*)`, the number of rows in the group. -/
+  | countAll
+  /-- An aggregate function applied to one column. -/
+  | apply (f : AggregateFn) (col : source.Index)
+
+/-- The type of the value an entry computes. -/
+def AggregateEntry.dbtype {d : Database} {source : View d} : AggregateEntry source → DBType
+  | .group col => (source.name col).dbtype
+  | .countAll => .int
+  | .apply .count _ => .int
+  | .apply .countDistinct _ => .int
+  | .apply _ col => (source.name col).dbtype
+
+/-- The columns of `source` that an aggregation groups over, i.e. those its output selects
+unaggregated. -/
+def AggregateEntry.groupColumn {d : Database} {source : View d} :
+    AggregateEntry source → Option source.Index
+  | .group col => some col
+  | _ => none
+
+/--
+An aggregation of the rows of `source` into the columns of `out`: every column of `out` is either
+one of the columns of `source` that is grouped over, or an aggregate function of the rows of a
+group.
+
+The `out` view is supplied by the caller, which is what keeps this general: its columns are
+typically `Database.Name.computation` names, whose type has to agree with what the corresponding
+entry computes.
+-/
+structure Aggregation {d : Database} (source out : View d) where
+  /-- What each output column is computed from. -/
+  entry : out.Index → AggregateEntry source
+  /-- The declared type of each output column is the type its entry computes. -/
+  dbtype_entry : ∀ i, (entry i).dbtype = (out.name i).dbtype := by
+    intro i; first | rfl | (cases i <;> rfl)
+
+/-- The columns that are grouped over, in the order of the output view. -/
+def Aggregation.groupColumns {d : Database} {source out : View d} (a : Aggregation source out) :
+    List source.Index :=
+  (Enum.all out.Index).toList.filterMap fun i => (a.entry i).groupColumn
+
 mutual
 
 /--
@@ -351,6 +431,14 @@ inductive Query (d : Database) : View d → Type 1 where
   | join {s t : View d} (q₁ : Query d s) (q₂ : Query d t) : Query d (s.prod t)
   -- Example: `Query d (s.prod t) -> Query d s`
   | project {s t : View d} (p : t.Hom s) (q₁ : Query d s) : Query d t
+  /-- Sort the rows of a query. Sorting is view-preserving: the output columns are unchanged. -/
+  | orderBy {view : View d} (keys : List (SortKey view)) (q : Query d view) : Query d view
+  /-- Keep at most `n` rows. -/
+  | limit {view : View d} (n : Nat) (q : Query d view) : Query d view
+  /-- Skip the first `n` rows. -/
+  | offset {view : View d} (n : Nat) (q : Query d view) : Query d view
+  /-- Group the rows of `q` and aggregate each group into a row of `out`. -/
+  | aggregate {source out : View d} (a : Aggregation source out) (q : Query d source) : Query d out
 
 end
 
@@ -373,6 +461,22 @@ example {d : Database} {n : Nat} {view : View d} (e : DBExpr d view (.varchar n)
 example {d : Database} {n : Nat} {view : View d} (e : DBExpr d view (.varchar n)) :
     DBExpr d view .bool :=
   .contains e "abc"
+
+/-- The one-column view holding an aggregate result of type `t` under the name `name`. -/
+def View.singleton (d : Database) (name : String) (t : DBType) : View d where
+  Index := IUnit name
+  name _ := .computation name t
+
+/-- `SELECT COUNT(*)`: the number of rows of `q`, as a query with a single `int` column named
+`name`. -/
+def Query.countAll {d : Database} {view : View d} (q : Query d view) (name : String := "count") :
+    Query d (View.singleton d name .int) :=
+  .aggregate { entry _ := .countAll } q
+
+/-- The single value of a row of a query over `View.singleton`. -/
+def View.singletonValue {d : Database} {name : String} {t : DBType}
+    (e : (View.singleton d name t).Entry) : t.Value :=
+  e.value ⟨⟩
 
 def signature {d : Database} (s : Std.HashSet d.Name) : Std.HashMap d.Name DBType :=
   s.inner.map (fun n _ ↦ n.dbtype)

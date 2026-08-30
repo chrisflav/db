@@ -46,6 +46,14 @@ syntax (name := queryBind) "let " ident " ← " "from " term : queryStmt
 syntax (name := queryGuard) "guard " term : queryStmt
 /-- Project the query onto one of the bound variables: `select x`. -/
 syntax (name := querySelect) "select " ident : queryStmt
+/-- Sort the result by a column of the selected table, e.g. `order_by b.title`. -/
+syntax (name := queryOrderBy) "order_by " term : queryStmt
+/-- Sort the result by a column of the selected table, descending. -/
+syntax (name := queryOrderByDesc) "order_by_desc " term : queryStmt
+/-- Keep at most `n` rows of the result, e.g. `limit 10`. -/
+syntax (name := queryLimit) "limit " num : queryStmt
+/-- Skip the first `n` rows of the result, e.g. `offset 20`. -/
+syntax (name := queryOffset) "offset " num : queryStmt
 
 /-- `query% do ...` elaborates a `do`-style query block into a `QuerySet`. -/
 syntax (name := queryDo) "query%" "do" many1Indent(queryStmt) : term
@@ -91,16 +99,22 @@ private def reduceToConstName (e : Expr) : MetaM (Option Name) := do
   let e ← reduce e
   return e.getAppFn.constName?
 
-/-- Build the `DBExpr` for the column named `field` of the `bidx`-th bound table, together with
-its `DBType`. -/
-private def columnVar (ctx : Context) (bidx : Nat) (field : Name) : TermElabM (Expr × Expr) := do
+/-- The constructor of the column-index enum of the `bidx`-th bound table that stands for the
+column named `field`. -/
+private def columnCtor (ctx : Context) (bidx : Nat) (field : Name) : TermElabM Expr := do
   let b := ctx.binders[bidx]!
   let ctorName := b.indexType ++ field
   let indInfo ← getConstInfoInduct b.indexType
   unless indInfo.ctors.contains ctorName do
     let cols := String.intercalate ", " (indInfo.ctors.map (·.getString!))
     throwError m!"`{b.type}` has no column `{field}`; available columns: {cols}"
-  let ctor := Lean.mkConst ctorName
+  return Lean.mkConst ctorName
+
+/-- Build the `DBExpr` for the column named `field` of the `bidx`-th bound table, together with
+its `DBType`. -/
+private def columnVar (ctx : Context) (bidx : Nat) (field : Name) : TermElabM (Expr × Expr) := do
+  let b := ctx.binders[bidx]!
+  let ctor ← columnCtor ctx bidx field
   -- The actual `DBType` of the column, used to type the resulting expression.
   let t ← reduce (← mkAppM ``Column.type
     #[← mkAppM ``Database.Name.column #[← mkAppM ``View.name #[b.view, ctor]]])
@@ -261,6 +275,9 @@ def elabQueryDo : TermElab := fun stx expectedType? => do
   let mut binderStx : Array (Ident × Term) := #[]
   let mut guardStx : Array Term := #[]
   let mut selectStx? : Option Ident := none
+  let mut sortStx : Array (Term × Bool) := #[]
+  let mut limitStx? : Option (TSyntax `num) := none
+  let mut offsetStx? : Option (TSyntax `num) := none
   for stmt in stmts do
     match stmt with
     | `(queryStmt| let $x:ident ← from $t:term) =>
@@ -273,6 +290,18 @@ def elabQueryDo : TermElab := fun stx expectedType? => do
         if selectStx?.isSome then
           throwErrorAt stmt "a query may contain at most one `select`"
         selectStx? := some x
+    | `(queryStmt| order_by $c:term) =>
+        sortStx := sortStx.push (c, false)
+    | `(queryStmt| order_by_desc $c:term) =>
+        sortStx := sortStx.push (c, true)
+    | `(queryStmt| limit $n:num) =>
+        if limitStx?.isSome then
+          throwErrorAt stmt "a query may contain at most one `limit`"
+        limitStx? := some n
+    | `(queryStmt| offset $n:num) =>
+        if offsetStx?.isSome then
+          throwErrorAt stmt "a query may contain at most one `offset`"
+        offsetStx? := some n
     | _ => throwErrorAt stmt "unexpected query statement"
   let some selectIdent := selectStx?
     | throwError "query is missing a `select` clause"
@@ -343,7 +372,35 @@ def elabQueryDo : TermElab := fun stx expectedType? => do
     let selE ← instantiateMVars (← Term.elabTerm selectIdent none)
     let some bidx := selE.fvarId?.bind fvarIdx.get?
       | throwErrorAt selectIdent m!"`select` must name one of the bound query variables"
-    let projQ ← mkAppM ``Query.project #[injs[bidx]!, q]
+    let mut projQ ← mkAppM ``Query.project #[injs[bidx]!, q]
+    -- `order_by`, `offset` and `limit` apply to the projected result, in that order, so that a
+    -- `limit` selects the first rows of the sorted result rather than sorting an arbitrary window.
+    let selView := binders[bidx]!.view
+    unless sortStx.isEmpty do
+      let mut keys : Array Expr := #[]
+      for (c, desc) in sortStx do
+        let e ← instantiateMVars (← Term.elabTerm c none)
+        Term.synthesizeSyntheticMVarsNoPostponing
+        let e ← instantiateMVars e
+        let args := e.getAppArgs
+        let some kidx :=
+            (if e.getAppFn.isConst && !args.isEmpty && args.back!.isFVar then
+              fvarIdx.get? args.back!.fvarId!
+            else none)
+          | throwErrorAt c m!"`order_by` expects a column of a bound query variable, like `x.name`"
+        unless kidx == bidx do
+          throwErrorAt c m!"`order_by` can only sort by a column of \
+            `{binders[bidx]!.name}`, the table given to `select`"
+        let ctor ← columnCtor ctx kidx (Name.mkSimple e.getAppFn.constName!.getString!)
+        let dir := Lean.mkConst (if desc then ``SortDirection.desc else ``SortDirection.asc)
+        keys := keys.push
+          (← mkAppOptM ``SortKey.mk #[some db₀, some selView, some ctor, some dir])
+      let keyList ← List.asExpr (← mkAppM ``SortKey #[selView]) keys.toList
+      projQ ← mkAppM ``Query.orderBy #[keyList, projQ]
+    if let some n := offsetStx? then
+      projQ ← mkAppM ``Query.offset #[Lean.mkNatLit n.getNat, projQ]
+    if let some n := limitStx? then
+      projQ ← mkAppM ``Query.limit #[Lean.mkNatLit n.getNat, projQ]
     let qs ← mkAppOptM ``QuerySet.mk #[some binders[bidx]!.type, none, some projQ]
     -- Register a term info spanning the whole block body, carrying the local context with the
     -- bound variables in scope. `hoverableInfoAt?` only matches nodes whose (canonical) range

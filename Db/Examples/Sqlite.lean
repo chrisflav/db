@@ -134,6 +134,95 @@ def operatorDemo : Sqlite.M Unit := do
           (.all _) }
   IO.println s!"Books by a retired author (via subquery): {byRetired.map (·.title.val)}"
 
+/-- The output view of "how many books does each author have": the grouped `author` column next to
+the number of rows in each group. -/
+inductive BooksPerAuthorIndex where
+  | author
+  | number
+  deriving DecidableEq, Hashable, Repr, Enum
+
+instance : ToString BooksPerAuthorIndex where
+  toString
+    | .author => "author"
+    | .number => "number"
+
+instance : FromString BooksPerAuthorIndex where
+  fromString
+    | "author" => some .author
+    | "number" => some .number
+    | _ => none
+
+instance : Indexing BooksPerAuthorIndex where
+
+def booksPerAuthorView : View (%database mydb) where
+  Index := BooksPerAuthorIndex
+  name
+    | .author => .computation "author" (.varchar 100)
+    | .number => .computation "number" .int
+
+/-- `SELECT author, COUNT(*) FROM book GROUP BY author`. -/
+def booksPerAuthor : Query (%database mydb) booksPerAuthorView :=
+  .aggregate
+    { entry
+        | .author => .group BookIndex.author
+        | .number => .countAll }
+    (.all (HasModel.model Book).index)
+
+/-- Exercise sorting, paging and aggregation end to end. -/
+def shapeDemo : Sqlite.M Unit := do
+  autoUpdate (%database mydb)
+  insert mike
+  insert lisa
+  insert nora
+  insert novel
+  insert drama
+  insert percent
+  insert sequel
+  -- `ORDER BY`, ascending and descending.
+  let sorted ← fetch <| query% do
+    let b ← from Book
+    select b
+    order_by b.title
+  IO.println s!"Books by title: {sorted.map (·.title.val)}"
+  let reversed ← fetch <| query% do
+    let b ← from Book
+    select b
+    order_by_desc b.title
+  IO.println s!"Books by title, descending: {reversed.map (·.title.val)}"
+  -- `LIMIT`, and `LIMIT` with `OFFSET`, applied to the sorted result.
+  let firstTwo ← fetch <| query% do
+    let b ← from Book
+    select b
+    order_by b.title
+    limit 2
+  IO.println s!"First two by title: {firstTwo.map (·.title.val)}"
+  let window ← fetch <| query% do
+    let b ← from Book
+    select b
+    order_by b.title
+    limit 2
+    offset 1
+  IO.println s!"Two books from the second on: {window.map (·.title.val)}"
+  -- `OFFSET` without a `LIMIT`, which SQLite only accepts with one supplied.
+  let skipped ← fetch
+    ((QuerySet.all (α := Book)).orderBy [{ column := BookIndex.title }] |>.offset 3)
+  IO.println s!"All but the first three by title: {skipped.map (·.title.val)}"
+  -- Sorting by two keys, the second breaking ties in the first.
+  let byAuthor ← fetch
+    ((QuerySet.all (α := Book)).orderBy [{ column := BookIndex.author },
+      { column := BookIndex.title, direction := .desc }])
+  IO.println s!"By author, then title descending: {byAuthor.map (·.title.val)}"
+  -- `COUNT(*)` of a whole table, and of a filtered query set.
+  IO.println s!"Number of books: {← HasModel.count (QuerySet.all (α := Book))}"
+  let dated : QuerySet Book :=
+    { query := .filter (.isNotNull (.var BookIndex.year .int)) (.all _) }
+  IO.println s!"Number of books with a year: {← HasModel.count dated}"
+  -- `COUNT(*)` grouped by author.
+  let grouped ← DBMonad.lookup booksPerAuthor
+  IO.println "Books per author:"
+  for row in grouped do
+    IO.println s!"  {row.value .author} wrote {row.value .number} book(s)"
+
 /-- Initial schema: a `widget` table whose `label` is a nullable `varchar(50)`. -/
 def widgetV1 : DatabaseRecipe where
   tables := .ofList
@@ -164,6 +253,7 @@ def migrationDemo : Sqlite.M Unit := do
 def test : IO Unit := do
   Sqlite.runDB ":memory:" bookDemo
   Sqlite.runDB ":memory:" operatorDemo
+  Sqlite.runDB ":memory:" shapeDemo
   Sqlite.runDB ":memory:" migrationDemo
 
 end SqliteExample
