@@ -29,7 +29,8 @@ def Expr.toString : Expr → String
   | .and e₁ e₂ => s!"({e₁.toString}) AND ({e₂.toString})"
   | .column table col => s!"{table}.{col}"
   | .var name => name
-  | .str s => s!"'{s}'"
+  -- Escape embedded single quotes by doubling them, as SQL requires.
+  | .str s => "'" ++ s.replace "'" "''" ++ "'"
   | .int n => ToString.toString n
   | .null => "NULL"
 
@@ -182,6 +183,36 @@ def Insert.fromInsert {d : Database} {tableName : d.Index} (ins : d.Insert table
 
 def Insert.toString (ins : Insert) : String :=
   s!"INSERT INTO {ins.intoTable} ({", ".intercalate (ins.values.map Prod.fst)}) VALUES ({", ".intercalate (ins.values.map fun x => x.2.toString)})"
+
+/-- A `DELETE` statement targeting a single table. -/
+structure Delete where
+  fromTable : String
+  condition : Expr
+
+def Delete.toString (del : Delete) : String :=
+  s!"DELETE FROM {del.fromTable} WHERE {del.condition.toString}"
+
+/-- Build a `DELETE` from a boolean condition over a view. SQL `DELETE` targets a single table, so
+this returns `none` unless every column of the view is a column of one and the same table.
+
+The condition is translated exactly like a query filter, which prints a variable as its view index.
+That only matches `DELETE FROM <table> WHERE ...` if the view's indices print as bare column names,
+as `Table.view`'s do. A join view's indices print as `left__`/`right__` prefixed aliases, which are
+only in scope inside the corresponding subquery, so such views are rejected as well. -/
+def Delete.fromCondition {d : Database} {view : View d} (e : DBExpr view .bool) :
+    Option Delete := do
+  let tableNames : List String ← (Enum.all view.Index).toList.mapM fun idx =>
+    match view.name idx with
+    | .ident i =>
+      if ToString.toString idx == ToString.toString i.columnName then
+        some (ToString.toString i.tableName)
+      else
+        none
+    | .computation .. => none
+  match tableNames with
+  | [] => none
+  | tn :: rest =>
+    if rest.all (· == tn) then some { fromTable := tn, condition := .fromExpr e } else none
 
 def DBType.toString : DBType → String
   | .int => "integer"

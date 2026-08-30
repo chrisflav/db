@@ -38,5 +38,8 @@ lean_lib Db.Examples
 
 require quot4 from git "https://github.com/leanprover-community/quote4" @ "v4.31.0"
 
+require leansqlite from git
+  "https://github.com/leanprover/leansqlite" @ "b61f1cfac14d03094cb3c0e65acd504416e47cad"
+
 @[default_target] lean_exe db where
   root := `Main

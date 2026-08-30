@@ -88,4 +88,9 @@ def fetch (q : QuerySet α) : m (Array α) := do
 def insert (x : α) : m Unit :=
   (HasModel.model α).insert x
 
+/-- Delete every row of `α`'s table matching the boolean condition `e`, returning the number of
+rows deleted. Build `e` from the model's column indices, e.g. `.eq (.var .author _) (.str v"Lisa")`. -/
+def delete (e : DBExpr (HasView.view α) .bool) : m Nat :=
+  DBMonad.delete (d := HasView.database α) e
+
 end HasModel
