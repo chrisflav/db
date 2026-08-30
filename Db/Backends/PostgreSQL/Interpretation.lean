@@ -70,19 +70,18 @@ def rowsOf (sql : String) : M (Array (Std.HashMap String (Option String))) := do
   let conn := (← get).connection
   match ← conn.exec sql with
   | .data data => return data.optRows
-  | .success => return #[]
+  | .success _ => return #[]
   | .failure e =>
     IO.println s!"{repr e}"
     throw .fatal
 
-/-- Run a statement that changes rows, and return how many it changed. -/
+/-- Run a statement that changes rows, and return how many it changed, as libpq's command tag
+reports it. -/
 def execCounting (sql : String) : M Nat := do
   let conn := (← get).connection
   match ← conn.exec sql with
-  -- libpq reports the affected row count as the command tag of a non-returning statement, which
-  -- these bindings do not expose, so the count is taken from a `RETURNING` result instead.
   | .data data => return data.nrows
-  | .success => return 0
+  | .success affected => return affected
   | .failure e =>
     IO.println s!"{repr e}"
     throw .fatal
@@ -92,32 +91,27 @@ instance (d : Database) : DBMonad d M where
     let sql : SQL.Select := .fromQuery q
     decodeRows view (← rowsOf sql.toString)
   insert {table} data := do
-    let conn := (← get).connection
     let sql : SQL.Insert := .fromInsert data
-    match ← conn.exec sql.toString with
-    | .failure e =>
-      IO.println s!"{repr e}"
-      throw .fatal
-    | _ => pure ()
+    _ ← execCounting sql.toString
   insertReturning {table} data := do
-    let sql : SQL.Insert := { SQL.Insert.fromInsert data with returning := true }
+    let sql : SQL.Insert := { SQL.Insert.fromInsert data with returning := SQL.columnNames table }
     decodeRows (Table.view table) (← rowsOf sql.toString)
   update {table} upd := do
-    let sql : SQL.Update := { SQL.Update.fromUpdate upd with returning := true }
+    let sql : SQL.Update := .fromUpdate upd
     -- An `UPDATE` with no assignment is not a statement; it also changes nothing.
     if sql.assignments.isEmpty then
       return 0
     execCounting sql.toString
   updateReturning {table} upd := do
-    let sql : SQL.Update := { SQL.Update.fromUpdate upd with returning := true }
+    let sql : SQL.Update := { SQL.Update.fromUpdate upd with returning := SQL.columnNames table }
     if sql.assignments.isEmpty then
       return #[]
     decodeRows (Table.view table) (← rowsOf sql.toString)
   delete {table} del := do
-    let sql : SQL.Delete := { SQL.Delete.fromDelete del with returning := true }
+    let sql : SQL.Delete := .fromDelete del
     execCounting sql.toString
   deleteReturning {table} del := do
-    let sql : SQL.Delete := { SQL.Delete.fromDelete del with returning := true }
+    let sql : SQL.Delete := { SQL.Delete.fromDelete del with returning := SQL.columnNames table }
     decodeRows (Table.view table) (← rowsOf sql.toString)
 
 /-- Run a statement, ignoring its result. -/
@@ -125,17 +119,38 @@ def execIgnoring (sql : String) : M Unit := do
   let conn := (← get).connection
   _ ← conn.exec sql
 
+/-- The name a nested transaction saves the connection under. Duplicates are fine: `ROLLBACK TO`
+and `RELEASE` act on the most recent savepoint of the name, which is the innermost one. -/
+def savepointName : String := "db_savepoint"
+
 instance : DBMonadTransactional M where
   withTransaction x := do
-    execIgnoring "BEGIN"
+    -- Nested inside a transaction already in progress, this is a savepoint: a second `BEGIN` is a
+    -- no-op PostgreSQL only warns about, so the inner `COMMIT` would commit the outer transaction.
+    let nested := (← get).connection.transactionStatus != .idle
+    execIgnoring (if nested then s!"SAVEPOINT {savepointName}" else "BEGIN")
     try
       let a ← x
-      execIgnoring "COMMIT"
+      if nested then
+        execIgnoring s!"RELEASE SAVEPOINT {savepointName}"
+      else if (← get).connection.transactionStatus == .inError then
+        -- A `COMMIT` of a transaction the server has aborted silently rolls back and reports
+        -- success, so reporting one here would claim the work was kept when it was discarded.
+        execIgnoring "ROLLBACK"
+        throw <| .userError <|
+          "the transaction was aborted by a statement the database rejected, so it was rolled " ++
+          "back rather than committed"
+      else
+        execIgnoring "COMMIT"
       return a
     catch e =>
       -- Only an `Exception` of this monad is caught here; an `IO` error thrown underneath escapes
       -- with the transaction still open, and the connection has to be discarded.
-      execIgnoring "ROLLBACK"
+      if nested then
+        execIgnoring s!"ROLLBACK TO SAVEPOINT {savepointName}"
+        execIgnoring s!"RELEASE SAVEPOINT {savepointName}"
+      else
+        execIgnoring "ROLLBACK"
       throw e
 
 structure InformationSchema where
@@ -205,7 +220,7 @@ def query (sql : String) : M (Array (Std.HashMap String (Option String))) := do
   let conn := (← get).connection
   match ← conn.exec sql with
   | .data data => return data.optRows
-  | .success => return #[]
+  | .success _ => return #[]
   | .failure err =>
     IO.println s!"Error {repr err}"
     throw .fatal
@@ -280,7 +295,7 @@ instance : DBMonadWithMigrations M where
     | .data _ =>
       IO.println s!"Returned data when no data was expected."
       throw .fatal
-    | .success => pure ()
+    | .success _ => pure ()
   currentDatabase := do
     let q : InformationSchema.model.Query :=
       .filter

@@ -106,7 +106,7 @@ instance (d : Database) : DBMonad d M where
     let sql : SQL.Insert := .fromInsert data
     db.exec sql.toString
   insertReturning {table} data := do
-    let sql : SQL.Insert := { SQL.Insert.fromInsert data with returning := true }
+    let sql : SQL.Insert := { SQL.Insert.fromInsert data with returning := SQL.columnNames table }
     decodeRows (Table.view table) (← query sql.toString)
   update {table} upd := do
     let db ← read
@@ -118,7 +118,7 @@ instance (d : Database) : DBMonad d M where
     -- `changes` reports the number of rows affected by the last statement.
     return (← db.changes).toInt.toNat
   updateReturning {table} upd := do
-    let sql : SQL.Update := { SQL.Update.fromUpdate upd with returning := true }
+    let sql : SQL.Update := { SQL.Update.fromUpdate upd with returning := SQL.columnNames table }
     if sql.assignments.isEmpty then
       return #[]
     decodeRows (Table.view table) (← query sql.toString)
@@ -128,12 +128,27 @@ instance (d : Database) : DBMonad d M where
     db.exec sql.toString
     return (← db.changes).toInt.toNat
   deleteReturning {table} del := do
-    let sql : SQL.Delete := { SQL.Delete.fromDelete del with returning := true }
+    let sql : SQL.Delete := { SQL.Delete.fromDelete del with returning := SQL.columnNames table }
     decodeRows (Table.view table) (← query sql.toString)
 
 instance : DBMonadTransactional M where
-  -- `SQLite.transaction` commits when the action returns and rolls back when it throws.
-  withTransaction x := fun db => db.transaction (x.run db)
+  withTransaction x := fun db => do
+    -- SQLite rejects a `BEGIN` inside a transaction, so a nested call is a savepoint instead. The
+    -- name may repeat: `ROLLBACK TO` and `RELEASE` act on the most recent savepoint of that name,
+    -- which is the innermost one.
+    if ← db.inTransaction then
+      db.exec "SAVEPOINT db_savepoint"
+      try
+        let a ← x.run db
+        db.exec "RELEASE db_savepoint"
+        return a
+      catch e =>
+        db.exec "ROLLBACK TO db_savepoint"
+        db.exec "RELEASE db_savepoint"
+        throw e
+    else
+      -- `SQLite.transaction` commits when the action returns and rolls back when it throws.
+      db.transaction (x.run db)
 
 /-- Whether `needle` occurs in `haystack` as a whole word, i.e. not as part of a longer
 identifier. Both are compared as given, so the caller upper-cases them. -/
