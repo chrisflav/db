@@ -278,16 +278,121 @@ def shapeDemo : Sqlite.M Unit := do
       |>.orderBy [{ column := BookIndex.author }])
   IO.println s!"By author, ties by title descending: {tiebroken.map (·.title.val)}"
 
+/-- A hand-written schema exercising `text` columns and column defaults: a literal default, a call
+default, a nullable column and a column with neither. -/
+inductive NoteIndex where
+  | id
+  | body
+  | state
+  | archived
+  | created
+  | tag
+  deriving DecidableEq, Hashable, Repr, Enum
+
+instance : ToString NoteIndex where
+  toString
+    | .id => "id"
+    | .body => "body"
+    | .state => "state"
+    | .archived => "archived"
+    | .created => "created"
+    | .tag => "tag"
+
+instance : FromString NoteIndex where
+  fromString
+    | "id" => some .id
+    | "body" => some .body
+    | "state" => some .state
+    | "archived" => some .archived
+    | "created" => some .created
+    | "tag" => some .tag
+    | _ => none
+
+instance : Indexing NoteIndex where
+
+def noteTable : Table where
+  Index := NoteIndex
+  columns
+    | .id => { type := .int, nullable := false }
+    | .body => { type := .text, nullable := false, default? := some (.str "") }
+    | .state => { type := .varchar 20, nullable := false, default? := some (.str "open") }
+    | .archived => { type := .bool, nullable := false, default? := some (.bool false) }
+    | .created => { type := .int, nullable := false, default? := some (.call "unixepoch()") }
+    | .tag => { type := .text, nullable := true }
+
+inductive NoteDbIndex where
+  | note
+  deriving DecidableEq, Hashable, Repr, Enum
+
+instance : ToString NoteDbIndex where
+  toString | .note => "note"
+
+instance : FromString NoteDbIndex where
+  fromString
+    | "note" => some .note
+    | _ => none
+
+instance : Indexing NoteDbIndex where
+
+def noteDb : Database where
+  Index := NoteDbIndex
+  tables
+    | .note => noteTable
+
+/-- Exercise unbounded text and column defaults: create the schema, insert a row that omits every
+column the database can fill in, insert one that supplies them, and confirm that the empty string
+stays distinguishable from `NULL` and that the schema round-trips through introspection. -/
+def defaultsDemo : Sqlite.M Unit := do
+  autoUpdate noteDb.recipe
+  -- Only `id` and `tag` are supplied; `body`, `state`, `archived` and `created` are left out of the
+  -- statement so that the database fills in their defaults.
+  DBMonad.insert (d := noteDb) (name := NoteDbIndex.note)
+    { value
+        | .id => some (1 : Int)
+        | .body => none
+        | .state => none
+        | .archived => none
+        | .created => none
+        | .tag => some (some "urgent") }
+  -- The second row supplies everything, including an empty `body` and a `NULL` `tag`.
+  DBMonad.insert (d := noteDb) (name := NoteDbIndex.note)
+    { value
+        | .id => some (2 : Int)
+        | .body => some ""
+        | .state => some (v"closed")
+        | .archived => some true
+        | .created => some (0 : Int)
+        | .tag => some none }
+  let rows ← DBMonad.lookup (Query.all (d := noteDb) .note)
+  IO.println "Notes:"
+  for row in rows do
+    letI body : String := row.value .body
+    letI tag : Option String := row.value .tag
+    letI created : Int := row.value .created
+    IO.println <|
+      s!"  id={row.value .id} body={repr body} state={row.value .state} " ++
+      s!"archived={row.value .archived} tag={repr tag} " ++
+      s!"created is set: {if 0 < created then "yes" else "no"}"
+  -- The defaults have to survive introspection, or `autoUpdate` would keep trying to fix them.
+  let pending := (← currentDatabase).operations noteDb.recipe
+  IO.println s!"Pending operations after creating the schema: {pending.size}"
+
 /-- Initial schema: a `widget` table whose `label` is a nullable `varchar(50)`. -/
 def widgetV1 : DatabaseRecipe where
   tables := .ofList
-    [("widget", { columns := .ofList [("id", ⟨.int, false⟩), ("label", ⟨.varchar 50, true⟩)] })]
+    [("widget",
+      { columns := .ofList
+          [("id", { type := .int, nullable := false }),
+           ("label", { type := .varchar 50, nullable := true })] })]
 
 /-- Target schema: `label` is widened to a non-null `varchar(200)`. SQLite cannot change a column in
 place, so migrating to this schema forces a table rebuild. -/
 def widgetV2 : DatabaseRecipe where
   tables := .ofList
-    [("widget", { columns := .ofList [("id", ⟨.int, false⟩), ("label", ⟨.varchar 200, false⟩)] })]
+    [("widget",
+      { columns := .ofList
+          [("id", { type := .int, nullable := false }),
+           ("label", { type := .varchar 200, nullable := false })] })]
 
 /-- Demonstrate an `ALTER COLUMN` migration: create `widget`, insert a row, then migrate the `label`
 column's type and nullability (via a table rebuild) and confirm the data survives. -/
@@ -299,7 +404,7 @@ def migrationDemo : Sqlite.M Unit := do
   let rows ← query "SELECT id, label FROM widget ORDER BY id"
   IO.println "Rows after migration (data preserved across the rebuild):"
   for row in rows do
-    IO.println s!"  id={row.getD "id" "?"}, label={row.getD "label" "?"}"
+    IO.println s!"  id={row.textD "id" "?"}, label={row.textD "label" "?"}"
   -- The migration is idempotent: re-running against the same target yields no further operations.
   let pending := (← currentDatabase).operations widgetV2
   IO.println s!"Pending operations after migration: {pending.size}"
@@ -309,6 +414,7 @@ def test : IO Unit := do
   Sqlite.runDB ":memory:" bookDemo
   Sqlite.runDB ":memory:" operatorDemo
   Sqlite.runDB ":memory:" shapeDemo
+  Sqlite.runDB ":memory:" defaultsDemo
   Sqlite.runDB ":memory:" migrationDemo
 
 end SqliteExample

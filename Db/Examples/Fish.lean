@@ -28,8 +28,8 @@ instance : Indexing FishIndex where
 abbrev fish : Table where
   Index := FishIndex
   columns
-    | .name => ⟨.varchar 100, false⟩
-    | .length => ⟨.int, false⟩
+    | .name => { type := .varchar 100, nullable := false }
+    | .length => { type := .int, nullable := false }
 
 inductive DatabaseIndex where
   | fish
@@ -54,7 +54,7 @@ abbrev database : Database where
 def nameIdent : database.Ident where
   tableName := .fish
   columnName := .length
-  column := ⟨.int, false⟩
+  column := { type := .int, nullable := false }
 
 example : nameIdent.dbtype = .int := rfl
 
@@ -71,9 +71,9 @@ def ins : SQL.Insert where
 
 def ins2 : SQL.Insert :=
   SQL.Insert.fromInsert (d := database) (tableName := .fish)
-    { entry.value
-        | .name => ⟨"Aal", by decide⟩
-        | .length => (56 : Int) }
+    { value
+        | .name => some ⟨"Aal", by decide⟩
+        | .length => some (56 : Int) }
 
 example : String :=
   SQL.Migration.CreateTable.toString (.fromTable fish "fish")
@@ -150,17 +150,20 @@ structure Lake where
 
 def test : IO Unit := do
   let nameIdent : database.Ident :=
-    { tableName := .fish, columnName := .name, column := ⟨.varchar 100, false⟩ }
+    { tableName := .fish, columnName := .name
+      column := { type := .varchar 100, nullable := false } }
   let name : database.Name :=
-    .ident { tableName := .fish, columnName := .name, column := ⟨.varchar 100, false⟩ }
+    .ident { tableName := .fish, columnName := .name
+             column := { type := .varchar 100, nullable := false } }
   let lengthIdent : database.Ident :=
-    { tableName := .fish, columnName := .length, column := ⟨.int, false⟩ }
+    { tableName := .fish, columnName := .length
+      column := { type := .int, nullable := false } }
   let length : database.Name :=
     .ident lengthIdent
   let ins : database.Insert .fish :=
-    { entry.value
-        | .name => ⟨"Aal", by decide⟩
-        | .length => (56 : Int) }
+    { value
+        | .name => some ⟨"Aal", by decide⟩
+        | .length => some (56 : Int) }
   let q : Query database _ :=
     .filter
       (.eq (.var FishIndex.name (.varchar 100)) (.str ⟨"Aal", by decide⟩))
