@@ -326,6 +326,8 @@ def interpretation : Interpretation Select where
 structure Insert where
   intoTable : String
   values : List (String × Expr)
+  /-- Whether the statement returns the rows it inserted. -/
+  returning : Bool := false
 
 def Insert.fromInsert {d : Database} {tableName : d.Index} (ins : d.Insert tableName) : Insert where
   intoTable := ToString.toString tableName
@@ -336,45 +338,61 @@ def Insert.fromInsert {d : Database} {tableName : d.Index} (ins : d.Insert table
       fun colName =>
         (ins.value colName).map (fun val => (ToString.toString colName, Expr.ofValue val))
 
+/-- The `RETURNING *` a statement carries when it is asked for its rows.
+
+The columns come back under their own names, which is exactly how the interpretation looks them
+up: the index of `Table.view` prints as the column name. -/
+def returningClause (returning : Bool) : String :=
+  if returning then " RETURNING *" else ""
+
 def Insert.toString (ins : Insert) : String :=
   -- An insert that supplies no column at all has to be written `DEFAULT VALUES`; the empty column
   -- and value lists are a syntax error.
   if ins.values.isEmpty then
-    s!"INSERT INTO {ins.intoTable} DEFAULT VALUES"
+    s!"INSERT INTO {ins.intoTable} DEFAULT VALUES{returningClause ins.returning}"
   else
     letI columns := ", ".intercalate (ins.values.map Prod.fst)
     letI values := ", ".intercalate (ins.values.map fun x => x.2.toString)
-    s!"INSERT INTO {ins.intoTable} ({columns}) VALUES ({values})"
+    s!"INSERT INTO {ins.intoTable} ({columns}) VALUES ({values})" ++
+      returningClause ins.returning
+
+/-- An `UPDATE` statement targeting a single table. -/
+structure Update where
+  table : String
+  /-- The columns to set, and what to set them to. -/
+  assignments : List (String × Expr)
+  condition : Expr
+  /-- Whether the statement returns the rows it changed. -/
+  returning : Bool := false
+
+def Update.toString (upd : Update) : String :=
+  letI sets := ", ".intercalate (upd.assignments.map fun a => s!"{a.1} = {a.2.toString}")
+  s!"UPDATE {upd.table} SET {sets} WHERE {upd.condition.toString}" ++
+    returningClause upd.returning
+
+def Update.fromUpdate {d : Database} {tableName : d.Index} (upd : d.Update tableName) : Update where
+  table := ToString.toString tableName
+  assignments :=
+    (Enum.all (d.tables tableName).Index).toList.filterMap
+      fun colName =>
+        (upd.value colName).map (fun e => (ToString.toString colName, Expr.fromExpr e))
+  condition := .fromExpr upd.condition
 
 /-- A `DELETE` statement targeting a single table. -/
 structure Delete where
   fromTable : String
   condition : Expr
+  /-- Whether the statement returns the rows it deleted. -/
+  returning : Bool := false
 
 def Delete.toString (del : Delete) : String :=
-  s!"DELETE FROM {del.fromTable} WHERE {del.condition.toString}"
+  s!"DELETE FROM {del.fromTable} WHERE {del.condition.toString}" ++
+    returningClause del.returning
 
-/-- Build a `DELETE` from a boolean condition over a view. SQL `DELETE` targets a single table, so
-this returns `none` unless every column of the view is a column of one and the same table.
-
-The condition is translated exactly like a query filter, which prints a variable as its view index.
-That only matches `DELETE FROM <table> WHERE ...` if the view's indices print as bare column names,
-as `Table.view`'s do. A join view's indices print as `left__`/`right__` prefixed aliases, which are
-only in scope inside the corresponding subquery, so such views are rejected as well. -/
-def Delete.fromCondition {d : Database} {view : View d} (e : DBExpr d view .bool) :
-    Option Delete := do
-  let tableNames : List String ← (Enum.all view.Index).toList.mapM fun idx =>
-    match view.name idx with
-    | .ident i =>
-      if ToString.toString idx == ToString.toString i.columnName then
-        some (ToString.toString i.tableName)
-      else
-        none
-    | .computation .. => none
-  match tableNames with
-  | [] => none
-  | tn :: rest =>
-    if rest.all (· == tn) then some { fromTable := tn, condition := .fromExpr e } else none
+def Delete.fromDelete {d : Database} {tableName : d.Index} (del : d.Delete tableName) :
+    Delete where
+  fromTable := ToString.toString tableName
+  condition := .fromExpr del.condition
 
 def DBType.toString : DBType → String
   | .int => "integer"

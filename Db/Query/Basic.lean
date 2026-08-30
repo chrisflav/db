@@ -622,6 +622,33 @@ structure Database.Insert (d : Database) (tableName : d.Index) where
         (fun idx => (value idx).isSome || ((d.tables tableName).columns idx).isOptional) := by
     first | rfl | decide
 
+/--
+An update of the rows of `tableName` that satisfy `condition`: every column is either set to the
+value of an expression over the row being updated, or left alone.
+-/
+structure Database.Update (d : Database) (tableName : d.Index) where
+  /-- The new value of each column, `none` to leave it alone. A nullable column is set to `NULL`
+  with `DBExpr.null`. -/
+  value (idx : (d.tables tableName).Index) :
+    Option (DBExpr d (Table.view tableName) ((d.tables tableName).columns idx).type)
+  /-- The rows to update. The default updates every row of the table. -/
+  condition : DBExpr d (Table.view tableName) .bool := .true
+
+/--
+A deletion of the rows of `tableName` that satisfy `condition`.
+
+Like `Database.Update`, this names the table it acts on rather than deriving it from the columns
+the condition happens to mention: SQL deletes from one table, and a condition over a join view
+mentions columns that are only in scope inside a subquery.
+-/
+structure Database.Delete (d : Database) (tableName : d.Index) where
+  /-- The rows to delete. The default deletes every row of the table. -/
+  condition : DBExpr d (Table.view tableName) .bool := .true
+
+/-- The update that sets no column at all, which leaves every row unchanged. -/
+def Database.Update.nothing {d : Database} {tableName : d.Index} : d.Update tableName where
+  value _ := none
+
 /-- The insert that supplies a value for every column of the table the database does not generate
 itself. The value an entry holds for an auto-incrementing column is meaningless before the row
 exists, so it is left out and the database assigns one. -/

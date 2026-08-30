@@ -522,7 +522,7 @@ def constraintsDemo : Sqlite.M Unit := do
   -- `ON DELETE CASCADE`: deleting a note takes its tag rows with it.
   let first : DBExpr noteDb (Table.view NoteDbIndex.note) .bool :=
     .eq (.var NoteIndex.id .int) (.int 1)
-  IO.println s!"Deleted notes: {← DBMonad.delete (d := noteDb) first}"
+  IO.println s!"Deleted notes: {← DBMonad.delete (d := noteDb) { condition := first }}"
   let remaining ← DBMonad.lookup (Query.all (d := noteDb) .noteTag)
   IO.println s!"Tag rows after the cascade: {remaining.size}"
   -- The constraints have to survive introspection too.
@@ -580,6 +580,53 @@ def quirkDemo : Sqlite.M Unit := do
 
 /-- Initial schema: a `widget` table whose `label` is a nullable `varchar(50)`, next to a column
 with an expression default. -/
+/-- Exercise `UPDATE`, `RETURNING` and transactions. -/
+def writeDemo : Sqlite.M Unit := do
+  autoUpdate (%database mydb)
+  insert mike
+  insert lisa
+  insert nora
+  -- `RETURNING` on an insert gives back the row the database stored, including the `id` it
+  -- generated and the insert therefore left out.
+  let urgent ← HasModel.insertReturning ({ id := 0, label := v"urgent" } : Tag)
+  let later ← HasModel.insertReturning ({ id := 0, label := v"later" } : Tag)
+  IO.println s!"Inserted tags: {urgent.id}={urgent.label}, {later.id}={later.label}"
+  -- `UPDATE` setting one column on the rows a condition matches.
+  let changed ← HasModel.update (α := Author)
+    { value
+        | .retired => some .true
+        | _ => none
+      condition := .lt (.var AuthorIndex.age .int) (.int 40) }
+  IO.println s!"Retired {changed} author(s) under 40."
+  -- `UPDATE ... RETURNING`, which gives back the rows as they now are.
+  let renamed ← HasModel.updateReturning (α := Tag)
+    { value
+        | .label => some (.str (v"urgent!"))
+        | _ => none
+      condition := .eq (.var TagIndex.id .int) (.int urgent.id) }
+  IO.println s!"Renamed: {renamed.map fun t => (t.id, t.label.val)}"
+  -- `DELETE ... RETURNING`, which gives back the rows as they last were.
+  let removed ← HasModel.deleteReturning (α := Tag)
+    (.eq (.var TagIndex.id .int) (.int later.id))
+  IO.println s!"Deleted: {removed.map fun t => (t.id, t.label.val)}"
+  -- A transaction that fails leaves nothing behind.
+  try
+    DBMonadTransactional.withTransaction (m := Sqlite.M) do
+      let _ ← HasModel.insertReturning ({ id := 0, label := v"doomed" } : Tag)
+      let n ← HasModel.count (QuerySet.all (α := Tag))
+      IO.println s!"Tags inside the transaction: {n}"
+      throw (IO.userError "something went wrong")
+  catch e =>
+    IO.println s!"Transaction rolled back: {e}"
+  IO.println s!"Tags after the rollback: {← HasModel.count (QuerySet.all (α := Tag))}"
+  -- A transaction that succeeds commits.
+  DBMonadTransactional.withTransaction (m := Sqlite.M) do
+    let _ ← HasModel.insertReturning ({ id := 0, label := v"kept" } : Tag)
+    pure ()
+  let tags ← fetch (QuerySet.all (α := Tag))
+  IO.println s!"Tags at the end: {tags.map (·.label.val)}"
+
+/-- Initial schema: a `widget` table whose `label` is a nullable `varchar(50)`. -/
 def widgetV1 : DatabaseRecipe where
   tables := .ofList
     [("widget",
@@ -630,6 +677,7 @@ def test : IO Unit := do
   Sqlite.runDB ":memory:" constraintsDemo
   Sqlite.runDB ":memory:" rebuildConstraintsDemo
   Sqlite.runDB ":memory:" quirkDemo
+  Sqlite.runDB ":memory:" writeDemo
   Sqlite.runDB ":memory:" migrationDemo
 
 end SqliteExample

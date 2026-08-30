@@ -26,6 +26,8 @@ inductive Exception where
   | decodeError (message : String)
   /-- A migration that cannot be carried out. -/
   | migrationError (message : String)
+  /-- A failure reported by a layer above the backend. -/
+  | userError (message : String)
   deriving Repr
 
 structure State where
@@ -44,38 +46,97 @@ def runDB (connectionInfo : String) {α : Type} (x : M α) : IO (Except Exceptio
   | some conn => x.run { connectionInfo := connectionInfo, connection := conn }
   | none => return .error .connectionError
 
+/-- Decode the rows of a result into the entries of `view`.
+
+A row whose columns cannot all be decoded is an error rather than a row to skip: dropping it would
+answer the query with silently fewer rows than it matched. -/
+def decodeRows {d : Database} (view : View d) (rows : Array (Std.HashMap String (Option String))) :
+    M (Array view.Entry) :=
+  rows.mapM fun row ↦ do
+    let mut map := default
+    for idx in Enum.all view.Index do
+      let name := s!"{idx}"
+      let some raw := row.get? name
+        | throw (.decodeError s!"the result has no column `{name}`.")
+      let some val := (view.name idx).column.ofRawValue? raw
+        | throw (.decodeError s!"cannot read {repr raw} as a value of column `{name}`.")
+      map := map.insert idx val
+    let some value := Enum.fromHashMap? map
+      | throw (.decodeError "the result is missing a column.")
+    return { value := value }
+
+/-- Run a statement expected to return rows, and return them. -/
+def rowsOf (sql : String) : M (Array (Std.HashMap String (Option String))) := do
+  let conn := (← get).connection
+  match ← conn.exec sql with
+  | .data data => return data.optRows
+  | .success => return #[]
+  | .failure e =>
+    IO.println s!"{repr e}"
+    throw .fatal
+
+/-- Run a statement that changes rows, and return how many it changed. -/
+def execCounting (sql : String) : M Nat := do
+  let conn := (← get).connection
+  match ← conn.exec sql with
+  -- libpq reports the affected row count as the command tag of a non-returning statement, which
+  -- these bindings do not expose, so the count is taken from a `RETURNING` result instead.
+  | .data data => return data.nrows
+  | .success => return 0
+  | .failure e =>
+    IO.println s!"{repr e}"
+    throw .fatal
+
 instance (d : Database) : DBMonad d M where
   lookup {view} q := do
-    let conn := (← get).connection
     let sql : SQL.Select := .fromQuery q
-    let res ← conn.exec sql.toString
-    match res with
-    | .data data =>
-        -- A row whose columns cannot all be decoded is an error rather than a row to skip:
-        -- dropping it would answer the query with silently fewer rows than it matched.
-        data.optRows.mapM <| fun row ↦ do
-          let mut map := default
-          for idx in Enum.all view.Index do
-            let name := s!"{idx}"
-            let some raw := row.get? name
-              | throw (.decodeError s!"the result has no column `{name}`.")
-            let some val := (view.name idx).column.ofRawValue? raw
-              | throw (.decodeError
-                  s!"cannot read {repr raw} as a value of column `{name}`.")
-            map := map.insert idx val
-          let some value := Enum.fromHashMap? map
-            | throw (.decodeError "the result is missing a column.")
-          return { value := value }
-    | .failure e => do
-      IO.println s!"{repr e}"
-      throw .fatal
-    | _ => throw .fatal
+    decodeRows view (← rowsOf sql.toString)
   insert {table} data := do
     let conn := (← get).connection
     let sql : SQL.Insert := .fromInsert data
-    _ ← conn.exec sql.toString
-  delete _ :=
-    throw .fatal
+    match ← conn.exec sql.toString with
+    | .failure e =>
+      IO.println s!"{repr e}"
+      throw .fatal
+    | _ => pure ()
+  insertReturning {table} data := do
+    let sql : SQL.Insert := { SQL.Insert.fromInsert data with returning := true }
+    decodeRows (Table.view table) (← rowsOf sql.toString)
+  update {table} upd := do
+    let sql : SQL.Update := { SQL.Update.fromUpdate upd with returning := true }
+    -- An `UPDATE` with no assignment is not a statement; it also changes nothing.
+    if sql.assignments.isEmpty then
+      return 0
+    execCounting sql.toString
+  updateReturning {table} upd := do
+    let sql : SQL.Update := { SQL.Update.fromUpdate upd with returning := true }
+    if sql.assignments.isEmpty then
+      return #[]
+    decodeRows (Table.view table) (← rowsOf sql.toString)
+  delete {table} del := do
+    let sql : SQL.Delete := { SQL.Delete.fromDelete del with returning := true }
+    execCounting sql.toString
+  deleteReturning {table} del := do
+    let sql : SQL.Delete := { SQL.Delete.fromDelete del with returning := true }
+    decodeRows (Table.view table) (← rowsOf sql.toString)
+
+/-- Run a statement, ignoring its result. -/
+def execIgnoring (sql : String) : M Unit := do
+  let conn := (← get).connection
+  _ ← conn.exec sql
+
+instance : DBMonadTransactional M where
+  withTransaction x := do
+    execIgnoring "BEGIN"
+    try
+      let a ← x
+      execIgnoring "COMMIT"
+      return a
+    catch e =>
+      -- Only an `Exception` of this monad is caught here; an `IO` error thrown underneath escapes
+      -- with the transaction still open, and the connection has to be discarded.
+      execIgnoring "ROLLBACK"
+      throw e
 
 structure InformationSchema where
   table_name : VarChar 100

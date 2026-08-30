@@ -106,6 +106,29 @@ def fetch (q : QuerySet α) : m (Array α) := do
 def insert (x : α) : m Unit :=
   (HasModel.model α).insert x
 
+/-- The insert of `x` into `α`'s table. -/
+def insertData (x : α) : (HasModel.database α).Insert (HasModel.model α).index :=
+  .ofEntry <| HasTable.encoding.toFun x
+
+/-- Insert `x` and return the row the database stored, which is how the value of a column the
+database generates, such as an `AutoKey`, is obtained without a second query. -/
+def insertReturning (x : α) : m α := do
+  let rows ← DBMonad.insertReturning (d := HasModel.database α) (insertData x)
+  let some row := rows[0]?
+    | DBMonadWithMigrations.abort <|
+        "the insert returned no row, so the value of a generated column cannot be reported"
+  return HasView.encoding.invFun row
+
+/-- Apply the update to `α`'s table, returning the number of rows changed. -/
+def update (upd : (HasModel.database α).Update (HasModel.model α).index) : m Nat :=
+  DBMonad.update upd
+
+/-- Apply the update to `α`'s table, returning the rows as they now are. -/
+def updateReturning (upd : (HasModel.database α).Update (HasModel.model α).index) :
+    m (Array α) := do
+  let rows ← DBMonad.updateReturning upd
+  return rows.map HasView.encoding.invFun
+
 /-- The number of rows the query set matches, counted by the database rather than by fetching the
 rows and counting them here. -/
 def count (q : QuerySet α) : m Int := do
@@ -115,6 +138,12 @@ def count (q : QuerySet α) : m Int := do
 /-- Delete every row of `α`'s table matching the boolean condition `e`, returning the number of
 rows deleted. Build `e` from the model's column indices, e.g. `.eq (.var .author _) (.str v"Lisa")`. -/
 def delete (e : DBExpr (HasView.database α) (HasView.view α) .bool) : m Nat :=
-  DBMonad.delete (d := HasView.database α) e
+  DBMonad.delete (d := HasView.database α) (name := (HasModel.model α).index) { condition := e }
+
+/-- Delete every row of `α`'s table matching `e` and return them as they last were. -/
+def deleteReturning (e : DBExpr (HasView.database α) (HasView.view α) .bool) : m (Array α) := do
+  let rows ← DBMonad.deleteReturning (d := HasView.database α)
+    (name := (HasModel.model α).index) { condition := e }
+  return rows.map HasView.encoding.invFun
 
 end HasModel
