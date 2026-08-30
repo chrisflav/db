@@ -67,6 +67,17 @@ def test : IO Unit := do
       IO.println s!"Book {book.title} by {book.author}."
 ```
 
+## Usage
+
+Add this dependency to your project's `lakefile.toml`:
+
+```toml
+[[require]]
+name = "Db"
+git = "https://github.com/chrisflav/db"
+rev = "master"
+```
+
 ## Query conditions
 
 Inside a `query% do` block a `guard` is an ordinary Lean term over the bound row variables, which
@@ -244,20 +255,15 @@ IO.println s!"the database assigned id {tag.id}"
 ```
 
 `DBMonadTransactional.withTransaction` groups several operations into one atomic unit, committing
-if the block succeeds and rolling back if it fails. On PostgreSQL only a failure of the backend's
-own exception type rolls back; an `IO` error thrown underneath escapes with the transaction still
-open.
+if the block succeeds and rolling back if it fails. A nested call is a savepoint, so its failure
+discards only its own work while an outer failure still discards everything. On PostgreSQL only a
+failure of the backend's own exception type rolls back; an `IO` error thrown underneath escapes
+with the transaction still open.
 
-## Usage
-
-Add this dependency to your project's `lakefile.toml`:
-
-```toml
-[[require]]
-name = "Db"
-git = "https://github.com/chrisflav/db"
-rev = "master"
-```
+A caveat on identifiers: DDL emits them unquoted, so PostgreSQL folds a mixed-case column name to
+lower case while SQLite keeps it. Queries and returning statements are unaffected, as both alias
+their columns, but schema introspection on PostgreSQL then reports the folded name and `autoUpdate`
+does not converge. Keep column names lower case for now.
 
 ## Design
 

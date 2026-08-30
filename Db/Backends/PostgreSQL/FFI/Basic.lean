@@ -55,6 +55,31 @@ def Result.status (res : Result) : ResultStatus :=
   | "PGRES_COMMAND_OK" => .COMMAND_OK
   | _ => .FATAL_ERROR res.errorMessage
 
+/-- The status of the transaction on a connection. -/
+inductive TransactionStatus where
+  | idle
+  | active
+  | inTransaction
+  | inError
+  | unknown
+  deriving Repr, DecidableEq
+
+@[extern "c_PQtransactionStatus"]
+opaque Connection.transactionStatusCode (conn : Connection) : UInt8
+
+def Connection.transactionStatus (conn : Connection) : TransactionStatus :=
+  match conn.transactionStatusCode with
+  | 0 => .idle
+  | 1 => .active
+  | 2 => .inTransaction
+  | 3 => .inError
+  | _ => .unknown
+
+/-- The number of rows the statement affected, as a decimal string; empty for a statement to which
+that does not apply. -/
+@[extern "c_PQcmdTuples"]
+opaque Result.cmdTuples (res : Result) : String
+
 @[extern "c_PQntuples"]
 opaque Result.ntuples (res : Result) : UInt32
 

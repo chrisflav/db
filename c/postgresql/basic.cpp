@@ -98,6 +98,17 @@ extern "C" lean_obj_res c_PQresultErrorMessage(lean_obj_arg result_) {
     return lean_mk_string(status);
 }
 
+// The number of rows a statement affected, as libpq reports it: a decimal string, empty for a
+// statement to which it does not apply.
+extern "C" lean_obj_res c_PQcmdTuples(lean_obj_arg result_) {
+    return lean_mk_string(PQcmdTuples(unbox_PGresult(result_)));
+}
+
+// PQTRANS_IDLE 0, PQTRANS_ACTIVE 1, PQTRANS_INTRANS 2, PQTRANS_INERROR 3, PQTRANS_UNKNOWN 4.
+extern "C" uint8_t c_PQtransactionStatus(lean_obj_arg conn_) {
+    return (uint8_t) PQtransactionStatus(unbox_PGconn(conn_));
+}
+
 extern "C" uint32_t c_PQntuples(lean_obj_arg result_) {
     return PQntuples(unbox_PGresult(result_));
 }

@@ -326,8 +326,8 @@ def interpretation : Interpretation Select where
 structure Insert where
   intoTable : String
   values : List (String × Expr)
-  /-- Whether the statement returns the rows it inserted. -/
-  returning : Bool := false
+  /-- The columns the statement returns, empty for one that returns nothing. -/
+  returning : List String := []
 
 def Insert.fromInsert {d : Database} {tableName : d.Index} (ins : d.Insert tableName) : Insert where
   intoTable := ToString.toString tableName
@@ -338,12 +338,19 @@ def Insert.fromInsert {d : Database} {tableName : d.Index} (ins : d.Insert table
       fun colName =>
         (ins.value colName).map (fun val => (ToString.toString colName, Expr.ofValue val))
 
-/-- The `RETURNING *` a statement carries when it is asked for its rows.
+/-- The `RETURNING` clause a statement carries when it is asked for its rows.
 
-The columns come back under their own names, which is exactly how the interpretation looks them
-up: the index of `Table.view` prints as the column name. -/
-def returningClause (returning : Bool) : String :=
-  if returning then " RETURNING *" else ""
+The columns are aliased rather than returned as `*`, exactly as `Selector.toString` aliases the
+columns of a `SELECT`: the databases fold an unquoted identifier to a case of their own, so a
+column whose name is not already in that case would come back under a name the interpretation does
+not look for. -/
+def returningClause (columns : List String) : String :=
+  if columns.isEmpty then ""
+  else " RETURNING " ++ ", ".intercalate (columns.map fun c => s!"{c} as \"{c}\"")
+
+/-- The names of the columns of a table, which is what a returning statement asks for. -/
+def columnNames {d : Database} (tableName : d.Index) : List String :=
+  (Enum.all (d.tables tableName).Index).toList.map ToString.toString
 
 def Insert.toString (ins : Insert) : String :=
   -- An insert that supplies no column at all has to be written `DEFAULT VALUES`; the empty column
@@ -362,8 +369,8 @@ structure Update where
   /-- The columns to set, and what to set them to. -/
   assignments : List (String × Expr)
   condition : Expr
-  /-- Whether the statement returns the rows it changed. -/
-  returning : Bool := false
+  /-- The columns the statement returns, empty for one that returns nothing. -/
+  returning : List String := []
 
 def Update.toString (upd : Update) : String :=
   letI sets := ", ".intercalate (upd.assignments.map fun a => s!"{a.1} = {a.2.toString}")
@@ -382,8 +389,8 @@ def Update.fromUpdate {d : Database} {tableName : d.Index} (upd : d.Update table
 structure Delete where
   fromTable : String
   condition : Expr
-  /-- Whether the statement returns the rows it deleted. -/
-  returning : Bool := false
+  /-- The columns the statement returns, empty for one that returns nothing. -/
+  returning : List String := []
 
 def Delete.toString (del : Delete) : String :=
   s!"DELETE FROM {del.fromTable} WHERE {del.condition.toString}" ++

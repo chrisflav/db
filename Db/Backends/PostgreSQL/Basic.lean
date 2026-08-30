@@ -40,7 +40,8 @@ inductive ResultError where
   deriving Repr
 
 inductive Result where
-  | success
+  /-- A statement that returned no rows, together with the number of rows it affected. -/
+  | success (affected : Nat)
   | data (data : ResultData)
   | failure (error : ResultError)
 
@@ -49,7 +50,7 @@ def Connection.exec (conn : Connection) (query : String) : IO Result := do
   let res ← conn.raw.exec query
   match res.status with
   | .TUPLES_OK => return .data { raw := res }
-  | .COMMAND_OK => return .success
+  | .COMMAND_OK => return .success (res.cmdTuples.toNat?.getD 0)
   | .NONFATAL_ERROR msg => return .failure (.nonfatal msg)
   | .FATAL_ERROR msg => return .failure (.fatal msg)
   | .EMPTY_QUERY => return .failure .emptyQuery
@@ -57,6 +58,10 @@ def Connection.exec (conn : Connection) (query : String) : IO Result := do
   | status =>
     IO.println s!"{repr status}"
     return .failure (.fatal "No error message.")
+
+/-- The status of the transaction on this connection. -/
+def Connection.transactionStatus (conn : Connection) : Internal.TransactionStatus :=
+  conn.raw.transactionStatus
 
 /-- The number of returned rows of a result data. -/
 def ResultData.nrows (data : ResultData) : Nat :=

@@ -578,8 +578,6 @@ def quirkDemo : Sqlite.M Unit := do
   let keys ← tableForeignKeys "chi"
   IO.println s!"Implicit reference read back as: {repr (keys.map (·.foreignColumns))}"
 
-/-- Initial schema: a `widget` table whose `label` is a nullable `varchar(50)`, next to a column
-with an expression default. -/
 /-- Exercise `UPDATE`, `RETURNING` and transactions. -/
 def writeDemo : Sqlite.M Unit := do
   autoUpdate (%database mydb)
@@ -623,10 +621,31 @@ def writeDemo : Sqlite.M Unit := do
   DBMonadTransactional.withTransaction (m := Sqlite.M) do
     let _ ← HasModel.insertReturning ({ id := 0, label := v"kept" } : Tag)
     pure ()
+  -- A transaction nested in another is a savepoint, so its failure discards only its own work.
+  DBMonadTransactional.withTransaction (m := Sqlite.M) do
+    let _ ← HasModel.insertReturning ({ id := 0, label := v"outer" } : Tag)
+    try
+      DBMonadTransactional.withTransaction (m := Sqlite.M) do
+        let _ ← HasModel.insertReturning ({ id := 0, label := v"inner" } : Tag)
+        throw (IO.userError "the inner transaction failed")
+    catch _ =>
+      pure ()
+  let afterInner ← fetch (QuerySet.all (α := Tag))
+  IO.println s!"After a failed inner transaction: {afterInner.map (·.label.val)}"
+  -- The outer one still discards everything, the inner one's work included.
+  try
+    DBMonadTransactional.withTransaction (m := Sqlite.M) do
+      DBMonadTransactional.withTransaction (m := Sqlite.M) do
+        let _ ← HasModel.insertReturning ({ id := 0, label := v"nested" } : Tag)
+        pure ()
+      throw (IO.userError "the outer transaction failed")
+  catch _ =>
+    pure ()
   let tags ← fetch (QuerySet.all (α := Tag))
   IO.println s!"Tags at the end: {tags.map (·.label.val)}"
 
-/-- Initial schema: a `widget` table whose `label` is a nullable `varchar(50)`. -/
+/-- Initial schema: a `widget` table whose `label` is a nullable `varchar(50)`, next to a column
+with an expression default. -/
 def widgetV1 : DatabaseRecipe where
   tables := .ofList
     [("widget",

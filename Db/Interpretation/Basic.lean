@@ -21,7 +21,8 @@ class DBMonad (d : Database) (m : Type → Type) where
   insertReturning {name : d.Index} (data : d.Insert name) : m (Array (Table.view name).Entry)
   /-- Apply the update. Return the number of rows changed. -/
   update {name : d.Index} (upd : d.Update name) : m Nat
-  /-- Apply the update and return the rows as they now are. -/
+  /-- Apply the update and return the rows as they now are. An update that sets no column at all
+  is not run and returns no rows, whatever its condition matches. -/
   updateReturning {name : d.Index} (upd : d.Update name) : m (Array (Table.view name).Entry)
   /-- Delete the rows the condition matches. Return the number of rows deleted. -/
   delete {name : d.Index} (del : d.Delete name) : m Nat
