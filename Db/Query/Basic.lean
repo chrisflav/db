@@ -159,12 +159,23 @@ instance : BEq Column where
     c₁.type == c₂.type && c₁.nullable == c₂.nullable &&
       match c₁.default?, c₂.default? with
       | some (.call _), some (.call _) => true
+      -- A column with no default already defaults to `NULL`, so `DEFAULT NULL` declares nothing.
+      -- PostgreSQL discards it outright for most types, so the two have to compare equal.
+      | some .null, none => true
+      | none, some .null => true
       | d₁, d₂ => d₁ == d₂
 
 /-- Whether an insert may leave this column out, because the database can supply a value for it:
-either its declared default, or `NULL`. -/
+either its declared default, or `NULL`.
+
+A `DEFAULT NULL` supplies nothing a `NOT NULL` column could use, so it does not make one
+omittable. -/
 def Column.isOptional (c : Column) : Bool :=
-  c.nullable || c.default?.isSome
+  c.nullable ||
+    match c.default? with
+    | some .null => false
+    | some _ => true
+    | none => false
 
 abbrev Column.Value : Column → Type
   | { type := type, nullable := false, .. } => type.Value

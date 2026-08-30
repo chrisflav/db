@@ -377,22 +377,52 @@ def defaultsDemo : Sqlite.M Unit := do
   let pending := (← currentDatabase).operations noteDb.recipe
   IO.println s!"Pending operations after creating the schema: {pending.size}"
 
-/-- Initial schema: a `widget` table whose `label` is a nullable `varchar(50)`. -/
+-- The parser has to recover what each database reports for a declared default, which is not the
+-- text the default was declared with.
+
+-- PostgreSQL reports a declared `DEFAULT -1` on an integer column as `'-1'::integer`.
+#guard SQL.ColumnDefault.parse? .int (SQL.stripCast "'-1'::integer") == some (.int (-1))
+-- SQLite reports an expression default with its parentheses already stripped, so an expression is
+-- told from a string literal by whether its quotes are those of one.
+#guard SQL.ColumnDefault.parse? .text "'a' || 'b'" == some (.call "'a' || 'b'")
+#guard SQL.ColumnDefault.parse? .int "1+1" == some (.call "1+1")
+#guard SQL.ColumnDefault.parse? .text "unixepoch()" == some (.call "unixepoch()")
+#guard SQL.ColumnDefault.parse? .text "'it''s'" == some (.str "it's")
+#guard SQL.ColumnDefault.parse? .text "''" == some (.str "")
+#guard SQL.ColumnDefault.parse? .bool "false" == some (.bool false)
+
+-- `DEFAULT NULL` supplies nothing a `NOT NULL` column can use, so it does not make one omittable,
+-- and it declares nothing a column without a default does not already do, which is why PostgreSQL
+-- discards it and the two have to compare equal.
+#guard !(Column.mk .int false (some .null)).isOptional
+#guard (Column.mk .int false (some (.int 0))).isOptional
+#guard (Column.mk .int true (some .null)) == (Column.mk .int true none)
+
+/-- Initial schema: a `widget` table whose `label` is a nullable `varchar(50)`, next to a column
+with an expression default. -/
 def widgetV1 : DatabaseRecipe where
   tables := .ofList
     [("widget",
       { columns := .ofList
           [("id", { type := .int, nullable := false }),
-           ("label", { type := .varchar 50, nullable := true })] })]
+           ("label", { type := .varchar 50, nullable := true }),
+           ("created", { type := .int, nullable := false,
+                         default? := some (.call "unixepoch()") })] })]
 
-/-- Target schema: `label` is widened to a non-null `varchar(200)`. SQLite cannot change a column in
-place, so migrating to this schema forces a table rebuild. -/
+/-- Target schema: `label` is widened to a non-null `varchar(200)` and a `NOT NULL` column with an
+expression default is added. SQLite can change neither a column in place nor add either of those,
+so migrating to this schema forces a table rebuild, which has to carry the expression default of
+`created` across intact. -/
 def widgetV2 : DatabaseRecipe where
   tables := .ofList
     [("widget",
       { columns := .ofList
           [("id", { type := .int, nullable := false }),
-           ("label", { type := .varchar 200, nullable := false })] })]
+           ("label", { type := .varchar 200, nullable := false }),
+           ("created", { type := .int, nullable := false,
+                         default? := some (.call "unixepoch()") }),
+           ("kind", { type := .varchar 20, nullable := false,
+                      default? := some (.call "upper('x')") })] })]
 
 /-- Demonstrate an `ALTER COLUMN` migration: create `widget`, insert a row, then migrate the `label`
 column's type and nullability (via a table rebuild) and confirm the data survives. -/
@@ -401,10 +431,12 @@ def migrationDemo : Sqlite.M Unit := do
   (← read).exec "INSERT INTO widget (id, label) VALUES (1, 'hello')"
   IO.println "Migrating `widget.label`: varchar(50) NULL -> varchar(200) NOT NULL ..."
   autoUpdate widgetV2
-  let rows ← query "SELECT id, label FROM widget ORDER BY id"
+  let rows ← query "SELECT id, label, kind, created > 0 AS c FROM widget ORDER BY id"
   IO.println "Rows after migration (data preserved across the rebuild):"
   for row in rows do
-    IO.println s!"  id={row.textD "id" "?"}, label={row.textD "label" "?"}"
+    IO.println <|
+      s!"  id={row.textD "id" "?"}, label={row.textD "label" "?"}, " ++
+      s!"kind={row.textD "kind" "?"}, created is set={row.textD "c" "?"}"
   -- The migration is idempotent: re-running against the same target yields no further operations.
   let pending := (← currentDatabase).operations widgetV2
   IO.println s!"Pending operations after migration: {pending.size}"
