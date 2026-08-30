@@ -189,9 +189,64 @@ def TableRecipe.operations (source target : TableRecipe) :
     Array TableOperation :=
   HasOperations.operations source target
 
+/--
+Order `names` so that each comes after the names `dependsOn` gives for it, as far as that is
+possible. A name that depends on itself, or on one that is not in `names`, is unconstrained by that
+dependency; a cycle among the names cannot be ordered and is left in the order it came.
+-/
+private def dependencyOrder (dependsOn : String → List String) (names : Array String) :
+    Array String := Id.run do
+  let mut placed : Std.HashSet String := ∅
+  let mut res : Array String := #[]
+  let mut remaining := names.toList
+  -- Each pass places at least one name unless none can be placed, so `names.size` passes suffice.
+  for _ in [0:names.size] do
+    if remaining.isEmpty then
+      break
+    let mut next : List String := []
+    for name in remaining do
+      let ready := (dependsOn name).all fun d =>
+        d == name || !(names.contains d) || placed.contains d
+      if ready then
+        res := res.push name
+        placed := placed.insert name
+      else
+        next := next ++ [name]
+    if next.length == remaining.length then
+      break
+    remaining := next
+  return res ++ remaining.toArray
+
 def DatabaseRecipe.operations (source target : DatabaseRecipe) :
     Array DatabaseOperation :=
-  HasOperations.operations source target
+  letI ops := HasOperations.operations source target
+  letI inserts := ops.filterMap fun op =>
+    match op with
+    | .insert name recipe => some (name, recipe)
+    | _ => none
+  letI removes := ops.filterMap fun op =>
+    match op with
+    | .remove name => some name
+    | _ => none
+  letI others := ops.filter fun op =>
+    match op with
+    | .insert .. => false
+    | .remove .. => false
+    | _ => true
+  letI references (recipe : TableRecipe) : List String :=
+    recipe.foreignKeys.map (·.foreignTable)
+  -- A `CREATE TABLE` carrying `REFERENCES` fails unless its target already exists, and a
+  -- `DROP TABLE` fails while something still references it, so creations go in dependency order
+  -- and drops in the reverse.
+  letI createOrder := dependencyOrder
+    (fun name => ((inserts.find? (·.1 == name)).map fun t => references t.2).getD [])
+    (inserts.map (·.1))
+  letI dropOrder := dependencyOrder
+    (fun name => (source.tables[name]?.map references).getD []) removes
+  letI orderedInserts := createOrder.filterMap fun name =>
+    (inserts.find? (·.1 == name)).map fun t => Std.HashMap.Operation.insert t.1 t.2
+  letI orderedRemoves := dropOrder.reverse.map Std.HashMap.Operation.remove
+  others ++ orderedRemoves ++ orderedInserts
 
 /-- The names of the tables that exist in both schemas but declare different constraints.
 
