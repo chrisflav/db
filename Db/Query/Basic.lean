@@ -312,10 +312,12 @@ inductive DBExpr (d : Database) : View d → DBType → Type 1 where
   | isNull {view : View d} {t : DBType} (e : DBExpr d view t) : DBExpr d view .bool
   /-- `IS NOT NULL`. -/
   | isNotNull {view : View d} {t : DBType} (e : DBExpr d view t) : DBExpr d view .bool
-  /-- Pattern match, `LIKE`. The pattern is a raw SQL `LIKE` pattern, so `%` and `_` in it are
-  wildcards; use `DBExpr.likeEscape` to match them literally. -/
+  /-- Pattern match, `LIKE`. In the pattern, `%` and `_` are wildcards and `\` escapes the
+  character after it, including itself; a literal backslash is therefore written `\\`. This is
+  declared to the backend as `ESCAPE '\'`, since PostgreSQL and SQLite disagree on the default.
+  `DBExpr.likeEscape` escapes a string to be matched literally. -/
   | like {view : View d} {t : DBType} (e : DBExpr d view t) (pattern : String)
-      (h : t.isTextLike := by decide) : DBExpr d view .bool
+      (h : t.isTextLike := by rfl) : DBExpr d view .bool
   /-- Membership in a literal list of values, `IN (v₁, ..., vₙ)`. An empty list is `FALSE`. -/
   | inList {view : View d} {t : DBType} (e : DBExpr d view t) (values : List t.Value) :
       DBExpr d view .bool
@@ -352,15 +354,25 @@ inductive Query (d : Database) : View d → Type 1 where
 
 end
 
-/-- Escape the SQL `LIKE` wildcards `%` and `_` in `s`, so that a pattern built from it matches
-them literally. The escape character is `\`, which `DBExpr.like` declares to the backend. -/
+/-- Escape the SQL `LIKE` wildcards `%` and `_` in `s`, as well as the escape character `\`
+itself, so that a pattern built from it matches `s` literally. -/
 def DBExpr.likeEscape (s : String) : String :=
   s.replace "\\" "\\\\" |>.replace "%" "\\%" |>.replace "_" "\\_"
 
 /-- `e LIKE '%s%'`, matching rows in which `s` occurs as a substring. -/
 def DBExpr.contains {d : Database} {view : View d} {t : DBType} (e : DBExpr d view t) (s : String)
-    (h : t.isTextLike := by decide) : DBExpr d view .bool :=
+    (h : t.isTextLike := by rfl) : DBExpr d view .bool :=
   .like e s!"%{DBExpr.likeEscape s}%" h
+
+-- The `isTextLike` side condition has to be dischargeable when the length of the column is not a
+-- literal, so that helpers over `like` can be length-polymorphic.
+example {d : Database} {n : Nat} {view : View d} (e : DBExpr d view (.varchar n)) :
+    DBExpr d view .bool :=
+  .like e "abc%"
+
+example {d : Database} {n : Nat} {view : View d} (e : DBExpr d view (.varchar n)) :
+    DBExpr d view .bool :=
+  .contains e "abc"
 
 def signature {d : Database} (s : Std.HashSet d.Name) : Std.HashMap d.Name DBType :=
   s.inner.map (fun n _ ↦ n.dbtype)

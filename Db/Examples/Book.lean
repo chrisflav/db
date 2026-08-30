@@ -48,6 +48,32 @@ def drama : Book where
   author := lisa.name
   year := none
 
+section DSLChecks
+
+open Db.Query.DSL
+
+/-- A term over a binder of the enclosing definition is a constant of the query, and is embedded as
+a literal. -/
+def booksBy (name : VarChar 100) : QuerySet Book := query% do
+  let b ← from Book
+  guard b.author = name
+  select b
+
+-- A term the DSL cannot translate has to be reported as such, even when it has the type of a
+-- database value: embedding it would let a row variable escape the query block.
+/--
+error: unsupported expression in query condition: `a.age + 1`
+-/
+#guard_msgs in
+-- An `example`, not a `def`: the failed elaboration leaves a `sorry` behind, which as a compiled
+-- top-level constant would abort the executable at load time.
+example : QuerySet Author := query% do
+  let a ← from Author
+  guard a.age + 1 > (5 : Int)
+  select a
+
+end DSLChecks
+
 def test : IO Unit := do
   let x : PostgreSQL.M (Array Book) := do
     -- Update database schema to target schema

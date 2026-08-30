@@ -220,15 +220,19 @@ private partial def transVal (ctx : Context) (e : Expr) : TermElabM (Expr × Exp
     if let some bidx := ctx.fvarIdx.get? args.back!.fvarId! then
       return ← columnVar ctx bidx (Name.mkSimple e.getAppFn.constName!.getString!)
   -- Anything else that has the type of a database value is a constant of the query: it is
-  -- evaluated when the query is built and embedded as a literal.
+  -- evaluated when the query is built and embedded as a literal. A term mentioning one of the row
+  -- variables is not a constant — embedding it would let the variable escape the query block — so
+  -- those fall through to the error below.
+  let mentionsRow := ctx.fvarIdx.toList.any fun (fv, _) => e.containsFVar fv
   let ty ← whnf (← inferType e)
-  if ty.isAppOfArity ``VarChar 1 then
-    let n := ty.appArg!
-    let t := mkApp (mkConst ``DBType.varchar) n
-    return (← mkAppOptM ``DBExpr.str #[some ctx.db, some ctx.view, some n, some e], t)
-  if ty.isConstOf ``Int then
-    return (← mkAppOptM ``DBExpr.int #[some ctx.db, some ctx.view, some e],
-      Lean.mkConst ``DBType.int)
+  if !mentionsRow then
+    if ty.isAppOfArity ``VarChar 1 then
+      let n := ty.appArg!
+      let t := mkApp (mkConst ``DBType.varchar) n
+      return (← mkAppOptM ``DBExpr.str #[some ctx.db, some ctx.view, some n, some e], t)
+    if ty.isConstOf ``Int then
+      return (← mkAppOptM ``DBExpr.int #[some ctx.db, some ctx.view, some e],
+        Lean.mkConst ``DBType.int)
   throwError m!"unsupported expression in query condition: `{e}`"
 
 /-- Translate a term that is expected to denote a boolean condition. -/
