@@ -17,7 +17,7 @@ class DBMonad (d : Database) (m : Type → Type) where
   /-- Insert the given data into the database. Return true if successful, false otherwise. -/
   insert {name : d.Index} (data : d.Insert name) : m Unit
   /-- Delete rows matching the expression. Return number of deleted rows. -/
-  delete {view : View d} (e : DBExpr view .bool) : m Nat
+  delete {view : View d} (e : DBExpr d view .bool) : m Nat
 
 class DBMonadWithMigrations (m : Type → Type) where
   [dbMonad (d : Database) : DBMonad d m]
