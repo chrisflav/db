@@ -69,6 +69,25 @@ variable {α : Type} [HasModel α]
 def all : QuerySet α where
   query := .all _
 
+end QuerySet
+
+namespace QuerySet
+
+variable {α : Type} [HasView α]
+
+/-- Sort the rows of a query set by the given keys, in order. -/
+def orderBy (q : QuerySet α) (keys : List (SortKey (HasView.view α))) : QuerySet α where
+  query := .orderBy keys q.query
+
+/-- Keep at most `n` rows. Applied after `orderBy`, so that it selects the first `n` rows of the
+sorted result. -/
+def limit (q : QuerySet α) (n : Nat) : QuerySet α where
+  query := .limit n q.query
+
+/-- Skip the first `n` rows. -/
+def offset (q : QuerySet α) (n : Nat) : QuerySet α where
+  query := .offset n q.query
+
 /-
 book where book.author = author.name ∧
            author.retired = True
@@ -87,6 +106,12 @@ def fetch (q : QuerySet α) : m (Array α) := do
 
 def insert (x : α) : m Unit :=
   (HasModel.model α).insert x
+
+/-- The number of rows the query set matches, counted by the database rather than by fetching the
+rows and counting them here. -/
+def count (q : QuerySet α) : m Int := do
+  let rows ← DBMonad.lookup (d := HasView.database α) q.query.countAll
+  return (rows[0]?.map View.singletonValue).getD 0
 
 /-- Delete every row of `α`'s table matching the boolean condition `e`, returning the number of
 rows deleted. Build `e` from the model's column indices, e.g. `.eq (.var .author _) (.str v"Lisa")`. -/

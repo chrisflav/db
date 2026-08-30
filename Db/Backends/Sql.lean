@@ -40,6 +40,8 @@ inductive Expr where
   | inList (e : Expr) (values : List Expr)
   /-- `e IN (SELECT ...)`. -/
   | inSelect (e : Expr) (sel : Select)
+  /-- An aggregate function call. `arg = none` renders as `*`, as in `COUNT(*)`. -/
+  | aggregate (fn : String) (distinct : Bool) (arg : Option Expr)
   -- Named variable (e.g. as produced by an alias)
   | var (name : String)
   -- Column indexed by table and column name (printed as `table.column`)
@@ -67,17 +69,26 @@ structure Select where
   selector : Selector
   from_ : From
   condition : Expr
+  groupBy : List Expr := []
+  orderBy : List (Expr × SortDirection) := []
+  limit : Option Nat := none
+  offset : Option Nat := none
 
 end
 
 instance : Inhabited Expr := ⟨.null⟩
 instance : Inhabited Selector := ⟨.all⟩
 instance : Inhabited From := ⟨.tableName "" none⟩
-instance : Inhabited Select := ⟨⟨.all, .tableName "" none, .true⟩⟩
+instance : Inhabited Select :=
+  ⟨{ selector := .all, from_ := .tableName "" none, condition := .true }⟩
 
 /-- A single-quoted SQL string literal, with embedded single quotes doubled as SQL requires. -/
 def quoteString (s : String) : String :=
   "'" ++ s.replace "'" "''" ++ "'"
+
+def sortDirectionToString : SortDirection → String
+  | .asc => "ASC"
+  | .desc => "DESC"
 
 mutual
 
@@ -103,6 +114,11 @@ partial def Expr.toString : Expr → String
   | .inList e values =>
     s!"({e.toString}) IN ({", ".intercalate (values.map Expr.toString)})"
   | .inSelect e sel => s!"({e.toString}) IN ({sel.toString})"
+  | .aggregate fn distinct arg =>
+    letI inner := match arg with
+      | some e => e.toString
+      | none => "*"
+    s!"{fn}({if distinct then "DISTINCT " else ""}{inner})"
   | .column table col => s!"{table}.{col}"
   | .var name => name
   | .str s => quoteString s
@@ -136,14 +152,32 @@ partial def From.toString : From → String
     s!"{left.toString} CROSS JOIN {right.toString}"
 
 partial def Select.toString (s : Select) : String :=
-  s!"SELECT {s.selector.toString} FROM {s.from_.toString} WHERE {s.condition.toString}"
+  letI groupBy :=
+    if s.groupBy.isEmpty then ""
+    else s!" GROUP BY {", ".intercalate (s.groupBy.map Expr.toString)}"
+  letI orderBy :=
+    if s.orderBy.isEmpty then ""
+    else
+      letI keys := s.orderBy.map fun k => s!"{k.1.toString} {sortDirectionToString k.2}"
+      s!" ORDER BY {", ".intercalate keys}"
+  -- SQLite rejects an `OFFSET` that is not preceded by a `LIMIT`, and PostgreSQL rejects a negative
+  -- limit, so an offset without a limit is emitted with the largest limit both of them accept.
+  letI limitOffset :=
+    match s.limit, s.offset with
+    | none, none => ""
+    | some n, none => s!" LIMIT {n}"
+    | some n, some m => s!" LIMIT {n} OFFSET {m}"
+    | none, some m => s!" LIMIT 9223372036854775807 OFFSET {m}"
+  s!"SELECT {s.selector.toString} FROM {s.from_.toString} WHERE {s.condition.toString}" ++
+    s!"{groupBy}{orderBy}{limitOffset}"
 
 end
 
 def Expr.fromName {d : Database} : d.Name → Expr
   | .ident ident => .column s!"{ident.tableName}" s!"{ident.columnName}"
-  -- TODO: placeholder implementation, fix this
-  | .computation name _ => .str name
+  -- A computed name is not a column of any table; it refers to the alias the query that computed
+  -- it gave the value.
+  | .computation name _ => .var name
 
 def Expr.ofDBTypeValue {t : DBType} (x : t.Value) : Expr :=
   match t with
@@ -156,6 +190,21 @@ def Expr.ofValue {c : Column} (x : c.Value) : Expr :=
   | { type := _, nullable := .false }, x => .ofDBTypeValue x
   | { type := _, nullable := .true }, some x => .ofDBTypeValue x
   | { type := _, nullable := .true }, none => .null
+
+/-- `s` turned into a base to hang further clauses off: a select that already limits or groups its
+rows has to become a subquery first, so that a `WHERE` or a further limit applies to the rows it
+produced rather than to the rows it was computed from. -/
+def Select.wrap (s : Select) : Select where
+  selector := .all
+  from_ := .select s none
+  condition := .true
+
+/-- The expression computing one output column of an aggregate query, in terms of the aliases the
+subquery holding its source rows exposes. -/
+def Expr.ofAggregateEntry {d : Database} {source : View d} : AggregateEntry source → Expr
+  | .group col => .var s!"{col}"
+  | .countAll => .aggregate "COUNT" Bool.false none
+  | .apply f col => .aggregate f.toString f.distinct (some (.var s!"{col}"))
 
 mutual
 
@@ -205,7 +254,12 @@ partial def Select.fromQuery {d : Database} {view : View d} (q : Query d view)
       from_ := .tableName (ToString.toString table) none
       condition := .true }
   | .filter e q =>
-    letI s := Select.fromQuery q within emb
+    letI inner := Select.fromQuery q within emb
+    -- A `WHERE` merged into a select that limits or groups its rows would be applied before the
+    -- limit or the grouping rather than after it, so such a select becomes a subquery first.
+    letI s :=
+      if inner.limit.isSome || inner.offset.isSome || !inner.groupBy.isEmpty then inner.wrap
+      else inner
     -- TODO: the names in the condition need to be fixed
     { s with condition := .and s.condition (Expr.fromExpr e) }
   | .join (s := view₁) (t := view₂) q₁ q₂ =>
@@ -230,6 +284,31 @@ partial def Select.fromQuery {d : Database} {view : View d} (q : Query d view)
     --      ((Enum.all view.Index).toList.map fun idx ↦ (s!"{emb.map idx}", .fromName <| view.name idx))
     --  from_ := select.from_
     --  condition := select.condition }
+  | .orderBy keys q =>
+    letI inner := Select.fromQuery q within emb
+    -- Sorting the rows a limit already selected is not the same as sorting before the limit.
+    letI s := if inner.limit.isSome || inner.offset.isSome then inner.wrap else inner
+    { s with orderBy := keys.map fun k => (.var s!"{emb.map k.column}", k.direction) }
+  | .limit n q =>
+    letI inner := Select.fromQuery q within emb
+    -- A second limit has to apply to the rows the first one selected.
+    letI s := if inner.limit.isSome then inner.wrap else inner
+    { s with limit := some n }
+  | .offset n q =>
+    letI inner := Select.fromQuery q within emb
+    -- `LIMIT n OFFSET m` skips before it takes, so an offset applied to a query that already
+    -- limits its rows would be applied in the wrong order.
+    letI s := if inner.limit.isSome || inner.offset.isSome then inner.wrap else inner
+    { s with offset := some n }
+  | .aggregate (out := out) a q =>
+    letI inner : Select := Select.fromQuery q
+    { selector :=
+        .fields
+          ((Enum.all out.Index).toList.map fun idx =>
+            (s!"{emb.map idx}", .ofAggregateEntry (a.entry idx)))
+      from_ := .select inner none
+      condition := .true
+      groupBy := a.groupColumns.map fun col => .var s!"{col}" }
 
 end
 

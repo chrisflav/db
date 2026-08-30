@@ -93,6 +93,47 @@ literal it is compared with; testing for `NULL` is `isNone`, not `= none`.
 Membership in a subquery, `col IN (SELECT ...)`, is `DBExpr.inSubquery` on the core API; the
 `query%` DSL has no surface syntax for it yet.
 
+## Ordering, paging and aggregates
+
+A `query% do` block can sort and page its result:
+
+```lean4
+query% do
+  let b ← from Book
+  guard b.author = v"Lisa"
+  select b
+  order_by b.title
+  limit 10
+  offset 20
+```
+
+`order_by`/`order_by_desc` may be repeated, in which case later keys break ties in earlier ones,
+and may only name a column of the table given to `select`. The clauses are applied to the projected
+result in the order `ORDER BY`, `OFFSET`, `LIMIT`, so a `limit` selects the first rows of the
+sorted result. The same is available on a `QuerySet` as `.orderBy`, `.limit` and `.offset`.
+
+`HasModel.count` counts the rows a query set matches without fetching them:
+
+```lean4
+IO.println s!"{← HasModel.count (QuerySet.all (α := Book))} books"
+```
+
+More general aggregation is `Query.aggregate`, which takes an `Aggregation source out`: every
+column of the output view `out` is either a column of `source` that is grouped over, or an
+aggregate (`COUNT(*)`, `COUNT`, `COUNT DISTINCT`, `SUM`, `MIN`, `MAX`) of the rows of a group.
+Supplying the output view is what keeps this general — it names and types the result columns:
+
+```lean4
+def booksPerAuthor : Query mydb booksPerAuthorView :=
+  .aggregate
+    { entry
+        | .author => .group BookIndex.author
+        | .number => .countAll }
+    (.all (HasModel.model Book).index)
+```
+
+`AVG` is missing because `DBType` has no floating-point type to give its result.
+
 ## Usage
 
 Add this dependency to your project's `lakefile.toml`:
