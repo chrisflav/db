@@ -142,8 +142,10 @@ structure RebuildColumn where
   notNull : Bool
   /-- The column's 1-based position in the table's `PRIMARY KEY`, or `0` if it is not part of it. -/
   primaryKey : Nat
-  /-- The SQL text of the column's `DEFAULT`, if it has one. -/
-  default? : Option String
+  /-- The column's `DEFAULT`, if it has one. Held parsed rather than as the text
+  `pragma_table_info` reports, which has already had the parentheses of an expression stripped and
+  would not parse back as SQL. -/
+  default? : Option ColumnDefault
   /-- The column's name in the *existing* table, whose data is copied across the rebuild, or `none`
   for a freshly added column, which has no data to preserve. -/
   source : Option String
@@ -157,8 +159,12 @@ def currentColumns (tableName : String) : M (Array RebuildColumn) := do
   return rows.filterMap fun row =>
     match row.text? "nm", row.text? "ty" with
     | some n, some ty =>
+      -- A default on a column whose type has no `DBType` counterpart is still carried across the
+      -- rebuild, as an expression.
+      letI default? := (row.text? "dv").map fun d =>
+        ((parseDBType ty).bind fun t => SQL.ColumnDefault.parse? t d).getD (.call d)
       some { name := n, type := ty, notNull := row.textD "nn" "0" == "1"
-             primaryKey := (row.textD "pk" "0").toNat?.getD 0, default? := row.text? "dv"
+             primaryKey := (row.textD "pk" "0").toNat?.getD 0, default? := default?
              source := some n }
     | _, _ => none
 
@@ -189,8 +195,7 @@ open SQL.Migration in
 def applyAlterCommand (cols : Array RebuildColumn) : AlterTableCommand → Array RebuildColumn
   | .addColumn field =>
     cols.push { name := field.name, type := field.type, notNull := !field.nullable
-                primaryKey := 0, default? := field.default?.map SQL.ColumnDefault.toString
-                source := none }
+                primaryKey := 0, default? := field.default?, source := none }
   | .dropColumn name => cols.filter fun c => c.name != name
   | .renameColumn old new => cols.map fun c => if c.name == old then { c with name := new } else c
   | .alterColumn name (.setType ty) =>
@@ -198,8 +203,7 @@ def applyAlterCommand (cols : Array RebuildColumn) : AlterTableCommand → Array
   | .alterColumn name (.setNullable nullable) =>
     cols.map fun c => if c.name == name then { c with notNull := !nullable } else c
   | .alterColumn name (.setDefault dflt) =>
-    cols.map fun c =>
-      if c.name == name then { c with default? := dflt.map SQL.ColumnDefault.toString } else c
+    cols.map fun c => if c.name == name then { c with default? := dflt } else c
 
 open SQL.Migration in
 /-- Rebuild `tableName` to the schema obtained by applying `commands` to its current columns. SQLite
@@ -223,7 +227,7 @@ def rebuildTable (tableName : String) (commands : List AlterTableCommand) : M Un
   let newCols := commands.foldl applyAlterCommand current
   let fieldDefs := newCols.toList.map fun c =>
     letI dflt := match c.default? with
-      | some d => s!" DEFAULT {d}"
+      | some d => s!" DEFAULT {SQL.ColumnDefault.toString d}"
       | none => ""
     s!"{c.name} {c.type}{if c.notNull then " NOT NULL" else ""}{dflt}"
   let pkCols := (newCols.toList.filter (·.primaryKey > 0)).mergeSort
@@ -280,10 +284,18 @@ instance : DBMonadWithMigrations M where
       -- with `NOT NULL` (it would have to fill the existing rows with `NULL`). If any command does
       -- one of those, rebuild the table, which also applies the remaining commands of the same
       -- operation. Otherwise SQLite supports the changes directly, one statement per command.
+      -- SQLite rejects `ADD COLUMN` with a non-constant default whatever the column's
+      -- nullability, and a `NOT NULL` column whose default is missing or `NULL`; the rest of an
+      -- `ADD COLUMN` it accepts.
       let needsRebuild := cmd.commands.any fun c =>
         match c with
         | .alterColumn .. => true
-        | .addColumn field => !field.nullable && field.default?.isNone
+        | .addColumn field =>
+          match field.default? with
+          | some (.call _) => true
+          | some .null => !field.nullable
+          | some _ => false
+          | none => !field.nullable
         | _ => false
       if needsRebuild then
         rebuildTable cmd.tableName cmd.commands

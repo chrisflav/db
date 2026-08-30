@@ -160,6 +160,10 @@ column may only be left out if it has a default or is nullable, which is a side 
 structure discharged by `rfl`. `Database.Insert.ofEntry` builds the insert that supplies
 everything, which is what the model layer uses.
 
+`DEFAULT NULL` declares nothing a column without a default does not already do, so it does not make
+a `NOT NULL` column omittable and compares equal to no default at all — which is what PostgreSQL
+reports back, having discarded it.
+
 The SQL text of a `.call` default is passed to the backend unchanged, so it has to be a call the
 target database knows — `unixepoch()` is SQLite's, PostgreSQL spells it differently. Defaults are
 read back by schema introspection so that `autoUpdate` reaches a fixed point. Since a database

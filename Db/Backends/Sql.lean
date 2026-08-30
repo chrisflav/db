@@ -392,30 +392,56 @@ def ColumnDefault.toString : ColumnDefault → String
   | .null => "NULL"
   | .call fn => s!"({fn})"
 
-/-- Parse a column default back from the SQL text a database reports for it. The type of the column
-disambiguates the literals that several types spell the same way, such as `0`. -/
+/-- Whether `s` is a single-quoted SQL string literal, i.e. every quote inside it is doubled. This
+is what tells a literal apart from an expression that merely begins and ends with a quote, such as
+`'a' || 'b'`, which matters because SQLite reports an expression default with its parentheses
+already stripped. -/
+def isQuotedLiteral (s : String) : Bool :=
+  s.length ≥ 2 && s.startsWith "'" && s.endsWith "'" &&
+    !(((s.drop 1).dropEnd 1).replace "''" "").contains '\''
+
+/--
+Parse a column default back from the SQL text a database reports for it. The type of the column
+disambiguates the literals that several types spell the same way, such as `0`.
+
+Anything that is not a literal of the column's type is an expression, since that is what the
+databases report for one: SQLite strips the parentheses a call was declared with, and PostgreSQL
+casts and constant-folds what it reports. Two expression defaults compare equal, so recognising one
+as an expression is all that is needed of it.
+-/
 def ColumnDefault.parse? (t : DBType) (raw : String) : Option ColumnDefault :=
   letI s := raw.trimAscii.toString
+  letI unquoted? : Option String :=
+    if isQuotedLiteral s then some (((s.drop 1).dropEnd 1).replace "''" "'") else none
+  letI asCall : Option ColumnDefault :=
+    if s.startsWith "(" && s.endsWith ")" then
+      -- Parenthesised, as `ColumnDefault.toString` writes a call.
+      some (.call ((s.drop 1).dropEnd 1).trimAscii.toString)
+    else
+      some (.call s)
   if s.isEmpty then
     none
   else if s.toUpper == "NULL" then
     some .null
-  else if s.length ≥ 2 && s.startsWith "'" && s.endsWith "'" then
-    some (.str (((s.drop 1).dropEnd 1).replace "''" "'"))
-  else if s.startsWith "(" && s.endsWith ")" then
-    -- A parenthesised expression, which is how `ColumnDefault.toString` writes a call.
-    some (.call ((s.drop 1).dropEnd 1).trimAscii.toString)
-  else if s.endsWith ")" then
-    -- A bare call, which is how PostgreSQL reports one.
-    some (.call s)
   else
-    match t, s.toUpper with
-    | .bool, "TRUE" => some (.bool true)
-    | .bool, "FALSE" => some (.bool false)
-    | .bool, "1" => some (.bool true)
-    | .bool, "0" => some (.bool false)
-    | .int, _ => s.toInt?.map .int
-    | _, _ => none
+    match t with
+    -- A literal of a non-character type can be reported quoted: PostgreSQL reports a declared
+    -- `DEFAULT -1` as `'-1'::integer`.
+    | .int =>
+      match (unquoted?.getD s).toInt? with
+      | some n => some (.int n)
+      | none => asCall
+    | .bool =>
+      match (unquoted?.getD s).toUpper with
+      | "TRUE" => some (.bool true)
+      | "FALSE" => some (.bool false)
+      | "1" => some (.bool true)
+      | "0" => some (.bool false)
+      | _ => asCall
+    | .varchar _ | .text =>
+      match unquoted? with
+      | some literal => some (.str literal)
+      | none => asCall
 
 /-- Strip the explicit type cast PostgreSQL appends to the column default it reports, e.g. the
 `::character varying` of `'open'::character varying`.
@@ -552,6 +578,7 @@ def AlterTable.fromMap (tableName : String) {source target : Table}
         if source.columns index != target.columns val then
           ops := .alterColumn s!"{val}"
             (.setType <| DBType.toString (target.columns val).type) :: ops
+          ops := .alterColumn s!"{val}" (.setNullable (target.columns val).nullable) :: ops
           ops := .alterColumn s!"{val}" (.setDefault (target.columns val).default?) :: ops
         if s!"{index}" != s!"{val}" then
           ops := .renameColumn s!"{index}" s!"{val}" :: ops
