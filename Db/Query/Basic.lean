@@ -95,11 +95,14 @@ inductive DBType where
   | bool : DBType
   | int : DBType
   | varchar (n : Nat) : DBType
+  /-- Character data of unbounded length. -/
+  | text : DBType
   deriving BEq, Repr, DecidableEq, Hashable
 
 protected abbrev DBType.Value : DBType → Type
   | .bool => Bool
   | .varchar n => VarChar n
+  | .text => String
   | .int => Int
 
 instance (t : DBType) : ToString t.Value where
@@ -107,6 +110,7 @@ instance (t : DBType) : ToString t.Value where
     match t with
     | .bool => toString x
     | .varchar _ => toString x
+    | .text => x
     | .int => toString x
 
 instance (t : DBType) : Inhabited t.Value where
@@ -114,41 +118,79 @@ instance (t : DBType) : Inhabited t.Value where
     match t with
     | .bool => default
     | .varchar _ => ⟨"", by simp⟩
+    | .text => default
     | .int => default
 
 instance : (t : DBType) → FromString t.Value
   | .bool => inferInstance
   | .int => inferInstance
   | .varchar _ => inferInstance
+  | .text => inferInstance
+
+/-- The value a column takes when an insert does not supply one. -/
+inductive ColumnDefault where
+  | int (n : Int)
+  | str (s : String)
+  | bool (b : Bool)
+  | null
+  /-- A call the database evaluates when a row is inserted, given as the SQL text of the call,
+  e.g. `"unixepoch()"`. -/
+  | call (fn : String)
+  deriving Repr, BEq, DecidableEq, Hashable
 
 structure Column where
   type : DBType
   nullable : Bool
+  /-- The value the database fills in when an insert omits this column. -/
+  default? : Option ColumnDefault := none
   deriving Repr, Hashable, DecidableEq
 
-abbrev Column.Value : Column → Type
-  | { type := type, nullable := false } => type.Value
-  | { type := type, nullable := true } => Option type.Value
+/--
+Equality of columns as the migration machinery compares them.
 
-instance : (col : Column) → FromString col.Value
-  | { type := type, nullable := false } => inferInstanceAs (FromString type.Value)
-  | { type := type, nullable := true } =>
-    { fromString
-        | "" => some none
-        | "NULL" => some none
-        | s => do
-          let val : type.Value ← FromString.fromString s
-          return (some val) }
+The databases rewrite the text of an expression default when they report it back — PostgreSQL
+reports a declared `abs(-1)` as `abs('-1'::integer)` — so two expression defaults cannot be
+compared by their text and are treated as the same. The consequence is that a change to an
+expression default is not migrated; the alternative would be an `autoUpdate` that never reaches a
+fixed point.
+-/
+instance : BEq Column where
+  beq c₁ c₂ :=
+    c₁.type == c₂.type && c₁.nullable == c₂.nullable &&
+      match c₁.default?, c₂.default? with
+      | some (.call _), some (.call _) => true
+      | d₁, d₂ => d₁ == d₂
+
+/-- Whether an insert may leave this column out, because the database can supply a value for it:
+either its declared default, or `NULL`. -/
+def Column.isOptional (c : Column) : Bool :=
+  c.nullable || c.default?.isSome
+
+abbrev Column.Value : Column → Type
+  | { type := type, nullable := false, .. } => type.Value
+  | { type := type, nullable := true, .. } => Option type.Value
 
 instance : (col : Column) → Inhabited col.Value
-  | { type := _, nullable := false } => inferInstance
-  | { type := _, nullable := true } => inferInstance
+  | { type := _, nullable := false, .. } => inferInstance
+  | { type := _, nullable := true, .. } => inferInstance
 
 instance : (col : Column) → ToString col.Value
-  | { type := _, nullable := false } => inferInstance
-  | { type := _, nullable := true } => inferInstance
+  | { type := _, nullable := false, .. } => inferInstance
+  | { type := _, nullable := true, .. } => inferInstance
 
-example : (Column.mk .int false).Value = Int := rfl
+/-- Decode the value a backend read for this column, where `none` is SQL's `NULL`.
+
+Reading `NULL` out of a column not declared nullable fails rather than being confused with the
+empty string, which for a `text` column is an ordinary value. -/
+def Column.ofRawValue? : (col : Column) → Option String → Option col.Value
+  | { type := _, nullable := false, .. }, none => none
+  | { type := _, nullable := false, .. }, some s => FromString.fromString s
+  | { type := _, nullable := true, .. }, none => some none
+  | { type := type, nullable := true, .. }, some s => do
+    let val : type.Value ← FromString.fromString s
+    return some val
+
+example : (Column.mk .int false none).Value = Int := rfl
 
 structure Table where
   Index : Type
@@ -274,6 +316,7 @@ def Table.entryViewEquiv {d : Database} (tableName : d.Index) :
 /-- Whether values of a type are character data, and hence comparable with SQL's `LIKE`. -/
 def DBType.isTextLike : DBType → Bool
   | .varchar _ => true
+  | .text => true
   | _ => false
 
 /-- The direction of one `ORDER BY` key. -/
@@ -499,5 +542,24 @@ def View.singletonValue {d : Database} {name : String} {c : Column}
 def signature {d : Database} (s : Std.HashSet d.Name) : Std.HashMap d.Name DBType :=
   s.inner.map (fun n _ ↦ n.dbtype)
 
+/--
+The data of a row to insert into `tableName`: a value for each column, except for those the
+database can supply a value for itself.
+-/
 structure Database.Insert (d : Database) (tableName : d.Index) where
-  entry : (Table.view tableName).Entry
+  /-- The value to insert into each column, `none` to leave it to the database. -/
+  value (idx : (d.tables tableName).Index) : Option ((d.tables tableName).columns idx).Value
+  /-- A column may only be left out if the database has a value for it, i.e. if it has a default
+  or is nullable. -/
+  omitted_isOptional :
+      -- Over the list rather than the array: `Array.all` does not reduce in the kernel, so the
+      -- side condition could then only be discharged by `native_decide`.
+      (Enum.all (d.tables tableName).Index).toList.all
+        (fun idx => (value idx).isSome || ((d.tables tableName).columns idx).isOptional) := by
+    first | rfl | decide
+
+/-- The insert that supplies a value for every column of the table. -/
+def Database.Insert.ofEntry {d : Database} {tableName : d.Index}
+    (e : (d.tables tableName).Entry) : d.Insert tableName where
+  value idx := some (e.value idx)
+  omitted_isOptional := by simp

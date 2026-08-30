@@ -49,8 +49,7 @@ def Model.Query.fetch (q : model.Query) : m (Array α) := do
     HasTable.encoding.invFun ((Table.entryViewEquiv model.index).toFun entry)
 
 def Model.insert (model : Model d α) (a : α) : m Unit := do
-  let data : d.Insert model.index :=
-    { entry := (Table.entryViewEquiv _).invFun <| HasTable.encoding.toFun a }
+  let data : d.Insert model.index := .ofEntry <| HasTable.encoding.toFun a
   DBMonad.insert data
 
 /-- A queryset on a type with canonical model is a query on the model. -/

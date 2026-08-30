@@ -139,9 +139,25 @@ def ResultData.rawRow (data : ResultData) (rowNumber : Fin data.nrows) :
     map := map.insert (data.columnName i) (data.rawValue rowNumber i)
   return map
 
+/-- The map `ColumnName → Value` of the `rowNumber`-th row, in which `none` is SQL's `NULL`.
+
+libpq reports a `NULL` field as the empty string, so the null flag is the only way to tell it
+apart from a genuinely empty value. -/
+def ResultData.optRow (data : ResultData) (rowNumber : Fin data.nrows) :
+    Std.HashMap String (Option String) := Id.run <| do
+  let mut map := .emptyWithCapacity
+  for i in Fin.range data.ncolumns do
+    map := map.insert (data.columnName i)
+      (if data.isNull rowNumber i then none else some (data.rawValue rowNumber i))
+  return map
+
 /-- The array of all rows in `data`. -/
 def ResultData.rawRows (data : ResultData) : Array (Std.HashMap String String) :=
   (Fin.range data.nrows).toArray.map (fun i ↦ data.rawRow i)
+
+/-- The array of all rows in `data`, in which `none` is SQL's `NULL`. -/
+def ResultData.optRows (data : ResultData) : Array (Std.HashMap String (Option String)) :=
+  (Fin.range data.nrows).toArray.map (fun i ↦ data.optRow i)
 
 /-- The array of all rows in `data`. -/
 def ResultData.rows (data : ResultData) : Array (Std.HashMap String Value) :=

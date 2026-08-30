@@ -47,14 +47,12 @@ instance (d : Database) : DBMonad d M where
     let res ← conn.exec sql.toString
     match res with
     | .data data =>
-        data.rawRows.filterMapM <| fun row ↦ do
+        data.optRows.filterMapM <| fun row ↦ do
           return .mk <$> Enum.fromHashMap? (← do
             let mut map := default
             for idx in Enum.all view.Index do
               if h : s!"{idx}" ∈ row then do
-                let x := row[s!"{idx}"]
-                match (FromString.fromString row[s!"{idx}"] :
-                    Option (view.name idx).column.Value) with
+                match (view.name idx).column.ofRawValue? row[s!"{idx}"] with
                 | some val => map := map.insert idx val
                 | none => pure ()
               else
@@ -78,6 +76,8 @@ structure InformationSchema where
   data_type : VarChar 100
   -- TODO: add `DBType.nat` and change this to `Nat`
   character_maximum_length : Option Int
+  /-- The SQL text of the column's `DEFAULT`, with the explicit cast PostgreSQL appends to it. -/
+  column_default : Option String
   table_schema : VarChar 100
   deriving Repr
 
@@ -86,11 +86,18 @@ def InformationSchema.column (info : InformationSchema) : Option Column := do
     match info.data_type.val with
     | "integer" => pure DBType.int
     | "boolean" => pure DBType.bool
-    | "character varying" => pure <| DBType.varchar (← info.character_maximum_length).toNat
+    | "text" => pure DBType.text
+    | "character varying" =>
+      match info.character_maximum_length with
+      | some n => pure <| DBType.varchar n.toNat
+      -- A `character varying` with no declared length is unbounded, which is what `text` means.
+      | none => pure DBType.text
     | _ => none
   pure
     { type := dbtype
-      nullable := info.is_nullable }
+      nullable := info.is_nullable
+      default? := info.column_default.bind fun d =>
+        SQL.ColumnDefault.parse? dbtype (SQL.stripCast d) }
 
 generate_table PostgreSQL.InformationSchema
 

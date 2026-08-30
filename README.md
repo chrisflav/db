@@ -137,6 +137,40 @@ def booksPerAuthor : Query mydb booksPerAuthorView :=
 
 `AVG` is missing because `DBType` has no floating-point type to give its result.
 
+## Column types and defaults
+
+`DBType` covers `bool`, `int`, `varchar n` and unbounded `text`. A model field of type `String`
+becomes a `text` column, `Option α` a nullable one.
+
+A column may declare a `default?`, which the database fills in when an insert omits it:
+
+```lean4
+def noteTable : Table where
+  Index := NoteIndex
+  columns
+    | .id => { type := .int, nullable := false }
+    | .body => { type := .text, nullable := false, default? := some (.str "") }
+    | .state => { type := .varchar 20, nullable := false, default? := some (.str "open") }
+    | .created => { type := .int, nullable := false, default? := some (.call "unixepoch()") }
+    | .tag => { type := .text, nullable := true }
+```
+
+A `Database.Insert` supplies a value for each column or `none` to leave it to the database; a
+column may only be left out if it has a default or is nullable, which is a side condition of the
+structure discharged by `rfl`. `Database.Insert.ofEntry` builds the insert that supplies
+everything, which is what the model layer uses.
+
+The SQL text of a `.call` default is passed to the backend unchanged, so it has to be a call the
+target database knows — `unixepoch()` is SQLite's, PostgreSQL spells it differently. Defaults are
+read back by schema introspection so that `autoUpdate` reaches a fixed point. Since a database
+rewrites the text of an expression default when it reports it back (PostgreSQL reports a declared
+`abs(-1)` as `abs('-1'::integer)`), two expression defaults are compared as equal, and a change to
+one is not migrated.
+
+Values read from a database keep `NULL` apart from the empty string: the backends use the driver's
+null flag rather than treating an empty result as `NULL`, which matters as soon as a column holds
+unbounded text.
+
 ## Usage
 
 Add this dependency to your project's `lakefile.toml`:

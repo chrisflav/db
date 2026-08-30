@@ -187,13 +187,14 @@ def Expr.ofDBTypeValue {t : DBType} (x : t.Value) : Expr :=
   match t with
   | .int => .int x
   | .varchar _ => .str x
+  | .text => .str x
   | .bool => if x then .true else .false
 
 def Expr.ofValue {c : Column} (x : c.Value) : Expr :=
   match c, x with
-  | { type := _, nullable := .false }, x => .ofDBTypeValue x
-  | { type := _, nullable := .true }, some x => .ofDBTypeValue x
-  | { type := _, nullable := .true }, none => .null
+  | { type := _, nullable := .false, .. }, x => .ofDBTypeValue x
+  | { type := _, nullable := .true, .. }, some x => .ofDBTypeValue x
+  | { type := _, nullable := .true, .. }, none => .null
 
 /-- `s` turned into a base to hang further clauses off: a select that already limits or groups its
 rows has to become a subquery first, so that a `WHERE` or a further limit applies to the rows it
@@ -329,11 +330,21 @@ structure Insert where
 def Insert.fromInsert {d : Database} {tableName : d.Index} (ins : d.Insert tableName) : Insert where
   intoTable := ToString.toString tableName
   values :=
-    (Enum.all (d.tables tableName).Index).toList.map
-      fun colName => ⟨ToString.toString colName, .ofValue (ins.entry.value colName)⟩
+    -- A column the insert leaves out is left out of the statement too, so that the database fills
+    -- in its default.
+    (Enum.all (d.tables tableName).Index).toList.filterMap
+      fun colName =>
+        (ins.value colName).map (fun val => (ToString.toString colName, Expr.ofValue val))
 
 def Insert.toString (ins : Insert) : String :=
-  s!"INSERT INTO {ins.intoTable} ({", ".intercalate (ins.values.map Prod.fst)}) VALUES ({", ".intercalate (ins.values.map fun x => x.2.toString)})"
+  -- An insert that supplies no column at all has to be written `DEFAULT VALUES`; the empty column
+  -- and value lists are a syntax error.
+  if ins.values.isEmpty then
+    s!"INSERT INTO {ins.intoTable} DEFAULT VALUES"
+  else
+    letI columns := ", ".intercalate (ins.values.map Prod.fst)
+    letI values := ", ".intercalate (ins.values.map fun x => x.2.toString)
+    s!"INSERT INTO {ins.intoTable} ({columns}) VALUES ({values})"
 
 /-- A `DELETE` statement targeting a single table. -/
 structure Delete where
@@ -368,7 +379,72 @@ def Delete.fromCondition {d : Database} {view : View d} (e : DBExpr d view .bool
 def DBType.toString : DBType → String
   | .int => "integer"
   | .varchar n => s!"varchar({n})"
+  | .text => "text"
   | .bool => "bool"
+
+/-- A column default, as it is written in a `CREATE TABLE`. A call is parenthesised, which SQLite
+requires and PostgreSQL accepts. -/
+def ColumnDefault.toString : ColumnDefault → String
+  | .int n => ToString.toString n
+  | .str s => quoteString s
+  | .bool true => "true"
+  | .bool false => "false"
+  | .null => "NULL"
+  | .call fn => s!"({fn})"
+
+/-- Parse a column default back from the SQL text a database reports for it. The type of the column
+disambiguates the literals that several types spell the same way, such as `0`. -/
+def ColumnDefault.parse? (t : DBType) (raw : String) : Option ColumnDefault :=
+  letI s := raw.trimAscii.toString
+  if s.isEmpty then
+    none
+  else if s.toUpper == "NULL" then
+    some .null
+  else if s.length ≥ 2 && s.startsWith "'" && s.endsWith "'" then
+    some (.str (((s.drop 1).dropEnd 1).replace "''" "'"))
+  else if s.startsWith "(" && s.endsWith ")" then
+    -- A parenthesised expression, which is how `ColumnDefault.toString` writes a call.
+    some (.call ((s.drop 1).dropEnd 1).trimAscii.toString)
+  else if s.endsWith ")" then
+    -- A bare call, which is how PostgreSQL reports one.
+    some (.call s)
+  else
+    match t, s.toUpper with
+    | .bool, "TRUE" => some (.bool true)
+    | .bool, "FALSE" => some (.bool false)
+    | .bool, "1" => some (.bool true)
+    | .bool, "0" => some (.bool false)
+    | .int, _ => s.toInt?.map .int
+    | _, _ => none
+
+/-- Strip the explicit type cast PostgreSQL appends to the column default it reports, e.g. the
+`::character varying` of `'open'::character varying`.
+
+Only a cast of the whole expression is stripped. A cast inside a call, as in the
+`abs('-1'::integer)` PostgreSQL reports for a declared `abs(-1)`, is part of the call and has to
+stay: cutting the expression there would leave an unbalanced fragment. -/
+def stripCast (s : String) : String := Id.run do
+  let cs := s.toList
+  let mut inQuote := false
+  let mut depth := 0
+  let mut cut : Option Nat := none
+  let mut i := 0
+  for c in cs do
+    if inQuote then
+      -- A doubled quote inside a literal toggles twice, which leaves the state correct.
+      inQuote := c != '\''
+    else if c == '\'' then
+      inQuote := true
+    else if c == '(' then
+      depth := depth + 1
+    else if c == ')' then
+      depth := depth - 1
+    else if c == ':' && depth == 0 && cs[i + 1]? == some ':' then
+      cut := some i
+    i := i + 1
+  match cut with
+  | some n => return (s.take n).trimAscii.toString
+  | none => return s
 
 namespace Migration
 
@@ -376,15 +452,20 @@ structure FieldDef where
   name : String
   type : String
   nullable : Bool
+  default? : Option ColumnDefault := none
 
 def FieldDef.toString (fieldDef : FieldDef) : String :=
-  s!"{fieldDef.name}  {fieldDef.type}{if not fieldDef.nullable then " NOT NULL" else ""}"
+  letI dflt := match fieldDef.default? with
+    | some d => s!" DEFAULT {ColumnDefault.toString d}"
+    | none => ""
+  s!"{fieldDef.name}  {fieldDef.type}{if not fieldDef.nullable then " NOT NULL" else ""}{dflt}"
 
 def FieldDef.fromColumn (column : Column) (name : String) : FieldDef where
   name := name
   type := DBType.toString column.type
   -- TODO: Technically, this is a constraint. Move to constraints?
   nullable := column.nullable
+  default? := column.default?
 
 -- TODO: fill placeholder implementation
 structure ConstraintDef where
@@ -416,11 +497,14 @@ def CreateTable.toString (cmd : CreateTable) : String :=
 inductive AlterColumnCommand where
   | setType (type : String)
   | setNullable (nullable : Bool)
+  | setDefault (default? : Option ColumnDefault)
 
 def AlterColumnCommand.toString : AlterColumnCommand → String
   | setType type => s!"TYPE {type}"
   | setNullable true => "DROP NOT NULL"
   | setNullable false => "SET NOT NULL"
+  | setDefault (some d) => s!"SET DEFAULT {ColumnDefault.toString d}"
+  | setDefault none => "DROP DEFAULT"
 
 inductive AlterTableCommand where
   | addColumn (field : FieldDef)
@@ -438,10 +522,10 @@ def AlterTableCommand.fromTableOperation : TableOperation → List AlterTableCom
   | .insert name col => [.addColumn (.fromColumn col name)]
   | .remove name => [.dropColumn name]
   | .rename old new => [.renameColumn old new]
-  -- TODO: this is currently ignoring the `nullable` field
   | .alter name col => [
       .alterColumn name (.setType <| DBType.toString col.type),
-      .alterColumn name (.setNullable <| col.nullable)
+      .alterColumn name (.setNullable <| col.nullable),
+      .alterColumn name (.setDefault col.default?)
     ]
 
 structure AlterTable where
@@ -466,7 +550,9 @@ def AlterTable.fromMap (tableName : String) {source target : Table}
       | some val =>
         visited := visited.insert val
         if source.columns index != target.columns val then
-          ops := .alterColumn s!"{val}" (.setType <| DBType.toString (target.columns val).type) :: ops
+          ops := .alterColumn s!"{val}"
+            (.setType <| DBType.toString (target.columns val).type) :: ops
+          ops := .alterColumn s!"{val}" (.setDefault (target.columns val).default?) :: ops
         if s!"{index}" != s!"{val}" then
           ops := .renameColumn s!"{index}" s!"{val}" :: ops
       | none =>

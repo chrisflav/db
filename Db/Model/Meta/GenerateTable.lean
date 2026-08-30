@@ -130,6 +130,10 @@ instance : HasDBType Int where
   type := .int
   encoding := Equiv.refl _
 
+instance : HasDBType String where
+  type := .text
+  encoding := Equiv.refl _
+
 instance (α : Type) [HasDBType α] : HasColumn α where
   column.type := HasDBType.type α
   column.nullable := false
