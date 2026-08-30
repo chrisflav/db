@@ -73,6 +73,10 @@ structure Select where
   orderBy : List (Expr × SortDirection) := []
   limit : Option Nat := none
   offset : Option Nat := none
+  /-- Whether the selector aggregates its rows. A `WHERE` cannot be merged into such a select: it
+  would be applied before the aggregation and would refer to columns the aggregate no longer has.
+  Note that an aggregation without a `GROUP BY` is still one. -/
+  isAggregate : Bool := false
 
 end
 
@@ -204,7 +208,7 @@ subquery holding its source rows exposes. -/
 def Expr.ofAggregateEntry {d : Database} {source : View d} : AggregateEntry source → Expr
   | .group col => .var s!"{col}"
   | .countAll => .aggregate "COUNT" Bool.false none
-  | .apply f col => .aggregate f.toString f.distinct (some (.var s!"{col}"))
+  | .apply f col _ => .aggregate f.toString f.distinct (some (.var s!"{col}"))
 
 mutual
 
@@ -258,8 +262,7 @@ partial def Select.fromQuery {d : Database} {view : View d} (q : Query d view)
     -- A `WHERE` merged into a select that limits or groups its rows would be applied before the
     -- limit or the grouping rather than after it, so such a select becomes a subquery first.
     letI s :=
-      if inner.limit.isSome || inner.offset.isSome || !inner.groupBy.isEmpty then inner.wrap
-      else inner
+      if inner.limit.isSome || inner.offset.isSome || inner.isAggregate then inner.wrap else inner
     -- TODO: the names in the condition need to be fixed
     { s with condition := .and s.condition (Expr.fromExpr e) }
   | .join (s := view₁) (t := view₂) q₁ q₂ =>
@@ -288,7 +291,10 @@ partial def Select.fromQuery {d : Database} {view : View d} (q : Query d view)
     letI inner := Select.fromQuery q within emb
     -- Sorting the rows a limit already selected is not the same as sorting before the limit.
     letI s := if inner.limit.isSome || inner.offset.isSome then inner.wrap else inner
-    { s with orderBy := keys.map fun k => (.var s!"{emb.map k.column}", k.direction) }
+    -- The new keys go in front of the ones already there rather than replacing them, so that
+    -- sorting an already sorted query breaks its ties by the earlier sort instead of losing it.
+    letI newKeys := keys.map fun k => (Expr.var s!"{emb.map k.column}", k.direction)
+    { s with orderBy := newKeys ++ s.orderBy }
   | .limit n q =>
     letI inner := Select.fromQuery q within emb
     -- A second limit has to apply to the rows the first one selected.
@@ -308,7 +314,8 @@ partial def Select.fromQuery {d : Database} {view : View d} (q : Query d view)
             (s!"{emb.map idx}", .ofAggregateEntry (a.entry idx)))
       from_ := .select inner none
       condition := .true
-      groupBy := a.groupColumns.map fun col => .var s!"{col}" }
+      groupBy := a.groupColumns.map fun col => .var s!"{col}"
+      isAggregate := true }
 
 end
 

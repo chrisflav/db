@@ -157,8 +157,8 @@ instance : Indexing BooksPerAuthorIndex where
 def booksPerAuthorView : View (%database mydb) where
   Index := BooksPerAuthorIndex
   name
-    | .author => .computation "author" (.varchar 100)
-    | .number => .computation "number" .int
+    | .author => .computation "author" { type := .varchar 100, nullable := false }
+    | .number => .computation "number" { type := .int, nullable := false }
 
 /-- `SELECT author, COUNT(*) FROM book GROUP BY author`. -/
 def booksPerAuthor : Query (%database mydb) booksPerAuthorView :=
@@ -167,6 +167,46 @@ def booksPerAuthor : Query (%database mydb) booksPerAuthorView :=
         | .author => .group BookIndex.author
         | .number => .countAll }
     (.all (HasModel.model Book).index)
+
+/-- The output view of "how many books were published in each year". `year` is nullable in `book`,
+so the column grouping over it has to be nullable too: the group of the books with no year is a
+row of the result like any other. -/
+inductive BooksPerYearIndex where
+  | year
+  | number
+  deriving DecidableEq, Hashable, Repr, Enum
+
+instance : ToString BooksPerYearIndex where
+  toString
+    | .year => "year"
+    | .number => "number"
+
+instance : FromString BooksPerYearIndex where
+  fromString
+    | "year" => some .year
+    | "number" => some .number
+    | _ => none
+
+instance : Indexing BooksPerYearIndex where
+
+def booksPerYearView : View (%database mydb) where
+  Index := BooksPerYearIndex
+  name
+    | .year => .computation "year" { type := .int, nullable := true }
+    | .number => .computation "number" { type := .int, nullable := false }
+
+/-- `SELECT year, COUNT(*) FROM book GROUP BY year`. -/
+def booksPerYear : Query (%database mydb) booksPerYearView :=
+  .aggregate
+    { entry
+        | .year => .group BookIndex.year
+        | .number => .countAll }
+    (.all (HasModel.model Book).index)
+
+-- `MIN`/`MAX` are defined on character data, so this entry has to elaborate; `SUM` over the same
+-- column does not, since `AggregateFn.appliesTo` rules it out.
+example : AggregateEntry (Table.view (HasModel.model Book).index) :=
+  .apply .max BookIndex.title
 
 /-- Exercise sorting, paging and aggregation end to end. -/
 def shapeDemo : Sqlite.M Unit := do
@@ -222,6 +262,21 @@ def shapeDemo : Sqlite.M Unit := do
   IO.println "Books per author:"
   for row in grouped do
     IO.println s!"  {row.value .author} wrote {row.value .number} book(s)"
+  -- Grouping over a nullable column: the group of the rows with no year is a row of the result.
+  let perYear ← DBMonad.lookup booksPerYear
+  IO.println "Books per year:"
+  for row in perYear do
+    letI year : Option Int := row.value .year
+    IO.println s!"  {repr year}: {row.value .number} book(s)"
+  -- Filtering an aggregate applies to the aggregated rows, not to the rows it aggregates.
+  let prolific ← DBMonad.lookup
+    (Query.filter (.gt (.var BooksPerAuthorIndex.number .int) (.int 1)) booksPerAuthor)
+  IO.println s!"Authors with more than one book: {prolific.map fun r => (r.value .author).val}"
+  -- Sorting an already sorted query breaks its ties by the earlier sort.
+  let tiebroken ← fetch
+    ((QuerySet.all (α := Book)).orderBy [{ column := BookIndex.title, direction := .desc }]
+      |>.orderBy [{ column := BookIndex.author }])
+  IO.println s!"By author, ties by title descending: {tiebroken.map (·.title.val)}"
 
 /-- Initial schema: a `widget` table whose `label` is a nullable `varchar(50)`. -/
 def widgetV1 : DatabaseRecipe where

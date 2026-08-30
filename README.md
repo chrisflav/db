@@ -120,8 +120,11 @@ IO.println s!"{← HasModel.count (QuerySet.all (α := Book))} books"
 
 More general aggregation is `Query.aggregate`, which takes an `Aggregation source out`: every
 column of the output view `out` is either a column of `source` that is grouped over, or an
-aggregate (`COUNT(*)`, `COUNT`, `COUNT DISTINCT`, `SUM`, `MIN`, `MAX`) of the rows of a group.
-Supplying the output view is what keeps this general — it names and types the result columns:
+aggregate (`COUNT(*)`, `COUNT`, `COUNT DISTINCT`, `SUM`, `MIN`, `MAX`) of the rows of a group. A
+function is only applicable to the types it is defined on, so `SUM` over a `varchar` column does
+not elaborate. Supplying the output view is what keeps this general — it names and types the
+result columns, nullability included: grouping over a nullable column, or taking the `MIN` of one,
+produces a column that can be `NULL`:
 
 ```lean4
 def booksPerAuthor : Query mydb booksPerAuthorView :=

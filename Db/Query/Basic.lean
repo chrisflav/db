@@ -198,7 +198,10 @@ def Database.Ident.all (d : Database) : Array d.Ident := Id.run do
 
 inductive Database.Name (d : Database) where
   | ident (i : d.Ident) : Name d
-  | computation (n : String) (t : DBType) : Name d
+  /-- A value a query computes rather than reads from a table, such as an aggregate. It carries a
+  full `Column` rather than a `DBType`, because such a value can be `NULL` even when no column it
+  is computed from is nullable. -/
+  | computation (n : String) (c : Column) : Name d
   deriving DecidableEq, Hashable
 
 structure View (d : Database) where
@@ -238,13 +241,11 @@ def View.sumInr {d : Database} (view₁ view₂ : View d) : Hom view₂ (view₁
 
 def Database.Name.column {d : Database} : d.Name → Column
   | .ident i => i.column
-  | .computation _ t =>
-    { type := t
-      nullable := false }
+  | .computation _ c => c
 
 def Database.Name.dbtype {d : Database} : d.Name → DBType
   | .ident i => i.dbtype
-  | .computation _ t => t
+  | .computation _ c => c.type
 
 def Database.Name.toString {d : Database} : d.Name → String
   | .ident i => i.toString
@@ -289,7 +290,9 @@ structure SortKey {d : Database} (view : View d) where
   column : view.Index
   direction : SortDirection := .asc
 
-/-- An aggregate function of one column. -/
+/-- An aggregate function of one column.
+
+`AVG` is missing because `DBType` has no floating-point type to give its result. -/
 inductive AggregateFn where
   | count
   | countDistinct
@@ -310,22 +313,35 @@ def AggregateFn.distinct : AggregateFn → Bool
   | .countDistinct => true
   | _ => false
 
+/-- Whether the function is defined on values of this type. Counting works on anything, `SUM` only
+on numbers, and `MIN`/`MAX` on everything the databases order, which excludes booleans. -/
+def AggregateFn.appliesTo : AggregateFn → DBType → Bool
+  | .count, _ => true
+  | .countDistinct, _ => true
+  | .sum, t => t == .int
+  | .min, t => t != .bool
+  | .max, t => t != .bool
+
 /-- How one output column of an aggregate query is computed from the columns of its source. -/
 inductive AggregateEntry {d : Database} (source : View d) : Type where
   /-- A column that is grouped over. It is selected as is and appears in `GROUP BY`. -/
   | group (col : source.Index)
   /-- `COUNT(*)`, the number of rows in the group. -/
   | countAll
-  /-- An aggregate function applied to one column. -/
+  /-- An aggregate function applied to one column, which has to be defined on that column's
+  type. -/
   | apply (f : AggregateFn) (col : source.Index)
+      (h : f.appliesTo (source.name col).dbtype := by rfl)
 
-/-- The type of the value an entry computes. -/
-def AggregateEntry.dbtype {d : Database} {source : View d} : AggregateEntry source → DBType
-  | .group col => (source.name col).dbtype
-  | .countAll => .int
-  | .apply .count _ => .int
-  | .apply .countDistinct _ => .int
-  | .apply _ col => (source.name col).dbtype
+/-- The column an entry computes, including whether its value can be `NULL`. -/
+def AggregateEntry.column {d : Database} {source : View d} : AggregateEntry source → Column
+  | .group col => (source.name col).column
+  | .countAll => { type := .int, nullable := false }
+  | .apply .count _ _ => { type := .int, nullable := false }
+  | .apply .countDistinct _ _ => { type := .int, nullable := false }
+  -- `SUM`, `MIN` and `MAX` are `NULL` for a group in which every value is `NULL`, whatever the
+  -- column they are applied to.
+  | .apply _ col _ => { type := (source.name col).dbtype, nullable := true }
 
 /-- The columns of `source` that an aggregation groups over, i.e. those its output selects
 unaggregated. -/
@@ -346,8 +362,10 @@ entry computes.
 structure Aggregation {d : Database} (source out : View d) where
   /-- What each output column is computed from. -/
   entry : out.Index → AggregateEntry source
-  /-- The declared type of each output column is the type its entry computes. -/
-  dbtype_entry : ∀ i, (entry i).dbtype = (out.name i).dbtype := by
+  /-- Each output column is declared exactly as its entry computes it. This is an equality of
+  `Column`s rather than of `DBType`s: getting the nullability wrong would make the backend read a
+  `NULL` into a type that has no value for it. -/
+  column_entry : ∀ i, (entry i).column = (out.name i).column := by
     intro i; first | rfl | (cases i <;> rfl)
 
 /-- The columns that are grouped over, in the order of the output view. -/
@@ -462,20 +480,20 @@ example {d : Database} {n : Nat} {view : View d} (e : DBExpr d view (.varchar n)
     DBExpr d view .bool :=
   .contains e "abc"
 
-/-- The one-column view holding an aggregate result of type `t` under the name `name`. -/
-def View.singleton (d : Database) (name : String) (t : DBType) : View d where
+/-- The one-column view holding a computed value under the name `name`. -/
+def View.singleton (d : Database) (name : String) (c : Column) : View d where
   Index := IUnit name
-  name _ := .computation name t
+  name _ := .computation name c
 
 /-- `SELECT COUNT(*)`: the number of rows of `q`, as a query with a single `int` column named
 `name`. -/
 def Query.countAll {d : Database} {view : View d} (q : Query d view) (name : String := "count") :
-    Query d (View.singleton d name .int) :=
+    Query d (View.singleton d name { type := .int, nullable := false }) :=
   .aggregate { entry _ := .countAll } q
 
 /-- The single value of a row of a query over `View.singleton`. -/
-def View.singletonValue {d : Database} {name : String} {t : DBType}
-    (e : (View.singleton d name t).Entry) : t.Value :=
+def View.singletonValue {d : Database} {name : String} {c : Column}
+    (e : (View.singleton d name c).Entry) : c.Value :=
   e.value ⟨⟩
 
 def signature {d : Database} (s : Std.HashSet d.Name) : Std.HashMap d.Name DBType :=
