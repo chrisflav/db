@@ -79,12 +79,15 @@ is translated into an SQL condition. The following are recognised:
 | `c₁ ∧ c₂`, `c₁ ∨ c₂`, `¬ c` (or `&&`, `\|\|`, `!`) | `AND`, `OR`, `NOT` |
 | `b.year.isNone`, `b.year.isSome` | `IS NULL`, `IS NOT NULL` |
 | `b.year = some 1998` | `= 1998` |
-| `like b.title "A drama%"` | `LIKE 'A drama%'` |
+| `like b.title "A drama%"` | `LIKE 'A drama%'`, with `\\` escaping the next character |
 | `contains b.title "100%"` | `LIKE '%100\\%%'`, with the wildcards in the needle escaped |
 | `isIn a.name [v"Mike", v"Nora"]` | `IN ('Mike', 'Nora')` |
 
 `like`, `contains` and `isIn` live in the `Db.Query.DSL` namespace and are only meaningful inside a
-query block. A nullable column projects to an `Option`-valued field, so `some` is written around a
+query block. In a `like` pattern `%` and `_` are wildcards and `\` escapes the character after it,
+including itself, so a literal backslash is written `\\`; this is declared to the backend as
+`ESCAPE '\'`, since PostgreSQL and SQLite disagree on the default. `contains` does that escaping
+for you. A nullable column projects to an `Option`-valued field, so `some` is written around a
 literal it is compared with; testing for `NULL` is `isNone`, not `= none`.
 
 Membership in a subquery, `col IN (SELECT ...)`, is `DBExpr.inSubquery` on the core API; the
