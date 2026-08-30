@@ -183,6 +183,28 @@ def Insert.fromInsert {d : Database} {tableName : d.Index} (ins : d.Insert table
 def Insert.toString (ins : Insert) : String :=
   s!"INSERT INTO {ins.intoTable} ({", ".intercalate (ins.values.map Prod.fst)}) VALUES ({", ".intercalate (ins.values.map fun x => x.2.toString)})"
 
+/-- A `DELETE` statement targeting a single table. -/
+structure Delete where
+  fromTable : String
+  condition : Expr
+
+def Delete.toString (del : Delete) : String :=
+  s!"DELETE FROM {del.fromTable} WHERE {del.condition.toString}"
+
+/-- Build a `DELETE` from a boolean condition over a view. SQL `DELETE` targets a single table, so
+this returns `none` if the view references columns from more than one table (or from none). The
+condition is translated exactly like a query filter, so column references print as bare column
+names, matching `DELETE FROM <table> WHERE ...`. -/
+def Delete.fromCondition {d : Database} {view : View d} (e : DBExpr view .bool) : Option Delete :=
+  let tableNames : List String :=
+    (Enum.all view.Index).toList.filterMap fun idx =>
+      match view.name idx with
+      | .ident i => some (ToString.toString i.tableName)
+      | .computation .. => none
+  match tableNames with
+  | [] => none
+  | tn :: rest => if rest.all (· == tn) then some { fromTable := tn, condition := .fromExpr e } else none
+
 def DBType.toString : DBType → String
   | .int => "integer"
   | .varchar n => s!"varchar({n})"
