@@ -82,17 +82,21 @@ instance (d : Database) : DBMonad d M where
   lookup {view} q := do
     let sql : SQL.Select := .fromQuery q
     let rows ← query sql.toString
-    rows.filterMapM fun row => do
-      return .mk <$> Enum.fromHashMap? (← do
-        let mut map := default
-        for idx in Enum.all view.Index do
-          if h : s!"{idx}" ∈ row then
-            match (view.name idx).column.ofRawValue? row[s!"{idx}"] with
-            | some val => map := map.insert idx val
-            | none => pure ()
-          else
-            pure ()
-        return map)
+    -- A row whose columns cannot all be decoded is an error rather than a row to skip: dropping it
+    -- would answer the query with silently fewer rows than it matched.
+    rows.mapM fun row => do
+      let mut map := default
+      for idx in Enum.all view.Index do
+        let name := s!"{idx}"
+        let some raw := row.get? name
+          | throw (IO.userError s!"SQLite backend: the result has no column `{name}`.")
+        let some val := (view.name idx).column.ofRawValue? raw
+          | throw (IO.userError
+              s!"SQLite backend: cannot read {repr raw} as a value of column `{name}`.")
+        map := map.insert idx val
+      let some value := Enum.fromHashMap? map
+        | throw (IO.userError "SQLite backend: the result is missing a column.")
+      return { value := value }
   insert {table} data := do
     let db ← read
     let sql : SQL.Insert := .fromInsert data
