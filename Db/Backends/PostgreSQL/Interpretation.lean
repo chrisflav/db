@@ -22,6 +22,8 @@ namespace PostgreSQL
 inductive Exception where
   | connectionError
   | fatal
+  /-- A value the database returned could not be read as the type the view declares for it. -/
+  | decodeError (message : String)
   deriving Repr
 
 structure State where
@@ -47,17 +49,21 @@ instance (d : Database) : DBMonad d M where
     let res ← conn.exec sql.toString
     match res with
     | .data data =>
-        data.optRows.filterMapM <| fun row ↦ do
-          return .mk <$> Enum.fromHashMap? (← do
-            let mut map := default
-            for idx in Enum.all view.Index do
-              if h : s!"{idx}" ∈ row then do
-                match (view.name idx).column.ofRawValue? row[s!"{idx}"] with
-                | some val => map := map.insert idx val
-                | none => pure ()
-              else
-                pure ()
-            return map)
+        -- A row whose columns cannot all be decoded is an error rather than a row to skip:
+        -- dropping it would answer the query with silently fewer rows than it matched.
+        data.optRows.mapM <| fun row ↦ do
+          let mut map := default
+          for idx in Enum.all view.Index do
+            let name := s!"{idx}"
+            let some raw := row.get? name
+              | throw (.decodeError s!"the result has no column `{name}`.")
+            let some val := (view.name idx).column.ofRawValue? raw
+              | throw (.decodeError
+                  s!"cannot read {repr raw} as a value of column `{name}`.")
+            map := map.insert idx val
+          let some value := Enum.fromHashMap? map
+            | throw (.decodeError "the result is missing a column.")
+          return { value := value }
     | .failure e => do
       IO.println s!"{repr e}"
       throw .fatal
