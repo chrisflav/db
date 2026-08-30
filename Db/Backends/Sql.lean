@@ -532,11 +532,43 @@ def CreateTable.fromRecipe (recipe : TableRecipe) (name : String) : CreateTable 
   unique := recipe.unique
   foreignKeys := recipe.foreignKeys
 
+/-- The columns of `cmd` whose value the database generates. -/
+def CreateTable.generated (cmd : CreateTable) : List FieldDef :=
+  cmd.fields.filter (·.autoIncrement)
+
+/--
+Whether SQLite declares the primary key of `cmd` inline, on the generated column itself.
+
+It only auto-increments a column declared exactly `INTEGER PRIMARY KEY`, so this holds precisely
+when there is one generated column and it is the whole primary key. `CreateTable.sqliteError?`
+rejects every other shape, rather than emitting a table with a key nobody asked for.
+-/
+def CreateTable.inlineKey (dialect : Dialect) (cmd : CreateTable) : Bool :=
+  match dialect, cmd.generated with
+  | .sqlite, [field] => cmd.primaryKey == [field.name]
+  | _, _ => false
+
+/-- Why SQLite cannot create this table, if it cannot. -/
+def CreateTable.sqliteError? (cmd : CreateTable) : Option String :=
+  match cmd.generated with
+  | [] => none
+  | [field] =>
+    if cmd.primaryKey == [field.name] then none
+    else
+      some <|
+        s!"table `{cmd.tableName}` declares the generated column `{field.name}`, but its " ++
+        s!"primary key is `{", ".intercalate cmd.primaryKey}`. SQLite only generates the value " ++
+        "of a column that is exactly `INTEGER PRIMARY KEY`, so the two have to coincide."
+  | fields =>
+    some <|
+      s!"table `{cmd.tableName}` declares more than one generated column " ++
+      s!"({", ".intercalate (fields.map (·.name))}). SQLite allows at most one, and it has " ++
+      "to be the primary key."
+
 def CreateTable.toString (dialect : Dialect) (cmd : CreateTable) : String :=
   letI fields : List String := cmd.fields.map (FieldDef.toString dialect)
-  -- On SQLite an auto-incrementing column already carries `PRIMARY KEY`, and a second declaration
-  -- of one is an error.
-  letI inlineKey := dialect == .sqlite && cmd.fields.any (·.autoIncrement)
+  -- Where SQLite declares the key inline it must not be declared a second time.
+  letI inlineKey := cmd.inlineKey dialect
   letI primaryKey : List String :=
     if cmd.primaryKey.isEmpty || inlineKey then []
     else [s!"PRIMARY KEY ({", ".intercalate cmd.primaryKey})"]

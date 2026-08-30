@@ -113,6 +113,31 @@ instance (d : Database) : DBMonad d M where
         "SQLite backend: `delete` requires a condition over a single table; " ++
         "the given view references columns from multiple tables."
 
+/-- Whether `needle` occurs in `haystack` as a whole word, i.e. not as part of a longer
+identifier. Both are compared as given, so the caller upper-cases them. -/
+def containsWord (haystack needle : String) : Bool := Id.run do
+  let isIdent (c : Char) : Bool := c.isAlphanum || c == '_'
+  let hs := haystack.toList
+  let ns := needle.toList
+  if ns.isEmpty || hs.length < ns.length then
+    return false
+  for i in [0:hs.length - ns.length + 1] do
+    let found := (List.range ns.length).all fun j => hs[i + j]! == ns[j]!
+    let beforeOk := i == 0 || !isIdent hs[i - 1]!
+    let afterOk := i + ns.length == hs.length || !isIdent hs[i + ns.length]!
+    if found && beforeOk && afterOk then
+      return true
+  return false
+
+/-- Whether `tableName` was declared `AUTOINCREMENT`. SQLite records this nowhere but in the text
+of the `CREATE TABLE`, so it is read back from there; the word is matched as a whole one, so that a
+table or column whose name merely contains it is not mistaken for a generated key. -/
+def isAutoIncrement (tableName : String) : M Bool := do
+  let rows ← query <|
+    s!"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{tableName}'"
+  letI declaration := (rows[0]?.bind (·.text? "sql")).getD ""
+  return containsWord declaration.toUpper "AUTOINCREMENT"
+
 /-- Parse the referential action SQLite reports for a foreign key. -/
 def parseForeignKeyAction (s : String) : ForeignKeyAction :=
   match s.toUpper with
@@ -155,6 +180,8 @@ structure RebuildColumn where
   `pragma_table_info` reports, which has already had the parentheses of an expression stripped and
   would not parse back as SQL. -/
   default? : Option ColumnDefault
+  /-- Whether the database assigns the column's value. -/
+  autoIncrement : Bool
   /-- The column's name in the *existing* table, whose data is copied across the rebuild, or `none`
   for a freshly added column, which has no data to preserve. -/
   source : Option String
@@ -162,9 +189,11 @@ structure RebuildColumn where
 /-- Introspect the current columns of `tableName`, in definition order, as `RebuildColumn`s whose
 `source` is their own name (they all exist and their data must be preserved). -/
 def currentColumns (tableName : String) : M (Array RebuildColumn) := do
+  let autoIncrement ← isAutoIncrement tableName
   let rows ← query <|
     s!"SELECT name AS nm, type AS ty, [notnull] AS nn, pk, dflt_value AS dv " ++
     s!"FROM pragma_table_info('{tableName}') ORDER BY cid"
+  let keySize := rows.filter (fun row => (row.textD "pk" "0").toNat?.getD 0 > 0) |>.size
   return rows.filterMap fun row =>
     match row.text? "nm", row.text? "ty" with
     | some n, some ty =>
@@ -172,8 +201,11 @@ def currentColumns (tableName : String) : M (Array RebuildColumn) := do
       -- rebuild, as an expression.
       letI default? := (row.text? "dv").map fun d =>
         ((parseDBType ty).bind fun t => SQL.ColumnDefault.parse? t d).getD (.call d)
+      letI position := (row.textD "pk" "0").toNat?.getD 0
       some { name := n, type := ty, notNull := row.textD "nn" "0" == "1"
-             primaryKey := (row.textD "pk" "0").toNat?.getD 0, default? := default?
+             primaryKey := position, default? := default?
+             autoIncrement :=
+               autoIncrement && position == 1 && keySize == 1 && parseDBType ty == some .int
              source := some n }
     | _, _ => none
 
@@ -187,24 +219,31 @@ def auxiliaryObjects (tableName : String) : M (Array String) := do
     "AND type IN ('index', 'trigger') AND sql IS NOT NULL"
   return rows.filterMap (·.text? "sql")
 
-/-- The names of `UNIQUE` constraints of `tableName` that a rebuild cannot reproduce. A `UNIQUE`
-constraint written inside `CREATE TABLE` is backed by an index SQLite generated itself, so it has no
-statement to re-run and is not visible in `pragma_table_info` either; rebuilding the table would
-drop it silently. A `PRIMARY KEY` is exempt: `currentColumns` recovers it from `pragma_table_info`.
--/
-def unrecoverableConstraints (tableName : String) : M (Array String) := do
-  let rows ← query <|
+/-- The column groups of the `UNIQUE` constraints `tableName` declares inside its `CREATE TABLE`.
+
+Those are backed by an index SQLite generated itself, so unlike a `CREATE UNIQUE INDEX` they have
+no statement of their own for `auxiliaryObjects` to re-run, and a rebuild has to declare them
+again. -/
+def inlineUnique (tableName : String) : M (List (List String)) := do
+  let indexRows ← query <|
     s!"SELECT il.name AS nm FROM pragma_index_list('{tableName}') il " ++
     "LEFT JOIN sqlite_master m ON m.name = il.name AND m.type = 'index' " ++
-    "WHERE il.origin = 'u' AND m.sql IS NULL"
-  return rows.filterMap (·.text? "nm")
+    "WHERE il.origin = 'u' AND m.sql IS NULL ORDER BY il.name"
+  let mut res : List (List String) := []
+  for indexRow in indexRows do
+    let some indexName := indexRow.text? "nm" | continue
+    let columnRows ← query <|
+      s!"SELECT name AS nm FROM pragma_index_info('{indexName}') ORDER BY seqno"
+    res := (columnRows.toList.filterMap (·.text? "nm")) :: res
+  return res.reverse
 
 open SQL.Migration in
 /-- Apply one `ALTER TABLE` command to the working column list of a table rebuild. -/
 def applyAlterCommand (cols : Array RebuildColumn) : AlterTableCommand → Array RebuildColumn
   | .addColumn field =>
     cols.push { name := field.name, type := field.type, notNull := !field.nullable
-                primaryKey := 0, default? := field.default?, source := none }
+                primaryKey := 0, default? := field.default?, autoIncrement := field.autoIncrement
+                source := none }
   | .dropColumn name => cols.filter fun c => c.name != name
   | .renameColumn old new => cols.map fun c => if c.name == old then { c with name := new } else c
   | .alterColumn name (.setType ty) =>
@@ -214,59 +253,15 @@ def applyAlterCommand (cols : Array RebuildColumn) : AlterTableCommand → Array
   | .alterColumn name (.setDefault dflt) =>
     cols.map fun c => if c.name == name then { c with default? := dflt } else c
 
-open SQL.Migration in
-/-- Rebuild `tableName` to the schema obtained by applying `commands` to its current columns. SQLite
-supports neither `ALTER COLUMN` nor adding a `NOT NULL` column, so those changes are realised by the
-standard create/copy/drop/rename dance, run inside a transaction so it is all-or-nothing.
-
-`DROP TABLE` also drops the table's indexes and triggers, so they are captured beforehand and
-re-created afterwards, and the `PRIMARY KEY` is carried over from `pragma_table_info`. A `UNIQUE`
-constraint written inside the original `CREATE TABLE` cannot be recovered this way, so rather than
-dropping it silently the rebuild refuses to run. -/
-def rebuildTable (tableName : String) (commands : List AlterTableCommand) : M Unit := do
-  let db ← read
-  let unrecoverable ← unrecoverableConstraints tableName
-  unless unrecoverable.isEmpty do
-    throw <| IO.userError <|
-      s!"SQLite backend: cannot rebuild table `{tableName}`, as it has UNIQUE constraint(s) " ++
-      s!"({", ".intercalate unrecoverable.toList}) declared in its `CREATE TABLE` statement, " ++
-      "which the rebuild would silently drop. Migrate this table by hand."
-  let current ← currentColumns tableName
-  let aux ← auxiliaryObjects tableName
-  let newCols := commands.foldl applyAlterCommand current
-  let fieldDefs := newCols.toList.map fun c =>
-    letI dflt := match c.default? with
-      | some d => s!" DEFAULT {SQL.ColumnDefault.toString d}"
-      | none => ""
-    s!"{c.name} {c.type}{if c.notNull then " NOT NULL" else ""}{dflt}"
-  let pkCols := (newCols.toList.filter (·.primaryKey > 0)).mergeSort
-    (fun c₁ c₂ => c₁.primaryKey ≤ c₂.primaryKey) |>.map (·.name)
-  let constraints := if pkCols.isEmpty then [] else [s!"PRIMARY KEY ({", ".intercalate pkCols})"]
-  -- Columns present both before and after keep their data; match old name → new name.
-  let copyPairs := newCols.toList.filterMap fun c => c.source.map (·, c.name)
-  let newNames := ", ".intercalate (copyPairs.map (·.2))
-  let oldNames := ", ".intercalate (copyPairs.map (·.1))
-  let tmp := s!"__db_migrate_{tableName}"
-  db.transaction do
-    db.exec s!"CREATE TABLE {tmp} (\n  {",\n  ".intercalate (fieldDefs ++ constraints)}\n)"
-    unless copyPairs.isEmpty do
-      db.exec s!"INSERT INTO {tmp} ({newNames}) SELECT {oldNames} FROM {tableName}"
-    db.exec s!"DROP TABLE {tableName}"
-    db.exec s!"ALTER TABLE {tmp} RENAME TO {tableName}"
-    for sql in aux do
-      db.exec sql
-
 /-- The columns, primary key and auto-increment flag of `tableName`, as `pragma_table_info` and the
 `CREATE TABLE` text report them. -/
 def tableColumns (tableName : String) : M (Std.HashMap String Column × List String) := do
-  -- SQLite records `AUTOINCREMENT` nowhere but in the text of the `CREATE TABLE`.
-  let tableRows ← query <|
-    s!"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{tableName}'"
-  let declaration := (tableRows[0]?.bind (·.text? "sql")).getD ""
-  let autoIncrement := (declaration.toUpper.splitOn "AUTOINCREMENT").length > 1
+  let autoIncrement ← isAutoIncrement tableName
   let rows ← query <|
     s!"SELECT name AS nm, type AS ty, [notnull] AS nn, pk, dflt_value AS dv " ++
     s!"FROM pragma_table_info('{tableName}') ORDER BY cid"
+  -- Whether the primary key is a single column decides whether it is the table's rowid.
+  let keySize := rows.filter (fun row => (row.textD "pk" "0").toNat?.getD 0 > 0) |>.size
   let mut columns : Std.HashMap String Column := ∅
   let mut key : Array (Nat × String) := #[]
   for row in rows do
@@ -280,13 +275,15 @@ def tableColumns (tableName : String) : M (Std.HashMap String Column × List Str
     let position := (row.textD "pk" "0").toNat?.getD 0
     if position > 0 then
       key := key.push (position, col)
-    -- `notnull` is `1` for a `NOT NULL` column, `0` otherwise. SQLite reports `0` for an
-    -- `INTEGER PRIMARY KEY`, which is the rowid and cannot be null all the same.
-    let nullable := row.textD "nn" "0" == "0" && position == 0
+    -- A single-column `INTEGER PRIMARY KEY` is the table's rowid, which cannot be null and which
+    -- SQLite nonetheless reports as nullable. Every other primary key column can be null, an old
+    -- quirk SQLite keeps for compatibility, so its `notnull` is taken at face value.
+    let isRowid := position == 1 && keySize == 1 && dbtype == .int
+    let nullable := row.textD "nn" "0" == "0" && !isRowid
     let default? := (row.text? "dv").bind (SQL.ColumnDefault.parse? dbtype)
     columns := columns.insert col
       { type := dbtype, nullable := nullable, default? := default?
-        autoIncrement := autoIncrement && position == 1 && dbtype == .int }
+        autoIncrement := autoIncrement && isRowid }
   let sortedKey := (key.toList.mergeSort (fun a b => decide (a.1 ≤ b.1))).map (·.2)
   return (columns, sortedKey)
 
@@ -314,7 +311,14 @@ def tableForeignKeys (tableName : String) : M (List (ForeignKey String)) := do
   for row in rows do
     let (some id, some ftbl, some col) := (row.text? "id", row.text? "ftbl", row.text? "col")
       | continue
-    let fcol := row.textD "fcol" col
+    -- A `to` of `NULL` means the key references the target's primary key implicitly; the column it
+    -- names is the one at the same position in that key.
+    let fcol ← match row.text? "fcol" with
+      | some c => pure c
+      | none => do
+        let (_, targetKey) ← tableColumns ftbl
+        let position := (row.textD "seq" "0").toNat?.getD 0
+        pure (targetKey[position]?.getD col)
     match byId[id]? with
     | some fk =>
       byId := byId.insert id
@@ -326,6 +330,87 @@ def tableForeignKeys (tableName : String) : M (List (ForeignKey String)) := do
           onDelete := parseForeignKeyAction (row.textD "od" "")
           onUpdate := parseForeignKeyAction (row.textD "ou" "") }
   return order.toList.filterMap (byId[·]?)
+
+open SQL.Migration in
+/-- Rebuild `tableName` to the schema obtained by applying `commands` to its current columns. SQLite
+supports neither `ALTER COLUMN` nor adding a `NOT NULL` column, so those changes are realised by the
+standard create/copy/drop/rename dance, run inside a transaction so it is all-or-nothing.
+
+`DROP TABLE` also drops the table's indexes and triggers, so they are captured beforehand and
+re-created afterwards, and the `PRIMARY KEY`, the generated key, the `UNIQUE` groups and the
+foreign keys are carried over from the pragmas. A constraint naming a column the rebuild renames or
+drops cannot be carried over, so rather than dropping it silently the rebuild refuses to run. -/
+def rebuildTable (tableName : String) (commands : List AlterTableCommand) : M Unit := do
+  let db ← read
+  let current ← currentColumns tableName
+  let aux ← auxiliaryObjects tableName
+  let unique ← inlineUnique tableName
+  let foreignKeys ← tableForeignKeys tableName
+  let newCols := commands.foldl applyAlterCommand current
+  let pkCols := (newCols.toList.filter (·.primaryKey > 0)).mergeSort
+    (fun c₁ c₂ => c₁.primaryKey ≤ c₂.primaryKey) |>.map (·.name)
+  -- A generated key is declared on the column and cannot be declared again below.
+  let inlineKey : Option String :=
+    match newCols.toList.filter (·.autoIncrement) with
+    | [c] => if pkCols == [c.name] then some c.name else none
+    | _ => none
+  let fieldDefs := newCols.toList.map fun c =>
+    if inlineKey == some c.name then
+      s!"{c.name} INTEGER PRIMARY KEY AUTOINCREMENT"
+    else
+      letI dflt := match c.default? with
+        | some d => s!" DEFAULT {SQL.ColumnDefault.toString d}"
+        | none => ""
+      s!"{c.name} {c.type}{if c.notNull then " NOT NULL" else ""}{dflt}"
+  -- A column the rebuild kept under the same name is still the one a foreign key refers to.
+  let kept : Std.HashSet String := .ofList (newCols.toList.filterMap fun c =>
+    if c.source == some c.name then some c.name else none)
+  for columns in unique ++ foreignKeys.map (·.columns) do
+    unless columns.all kept.contains do
+      throw <| IO.userError <|
+        s!"SQLite backend: cannot rebuild table `{tableName}`, as its constraint on " ++
+        s!"({", ".intercalate columns}) names columns the migration renames or drops, so the " ++
+        "rebuild would silently drop the constraint. Migrate this table by hand."
+  let uniqueDefs := unique.map fun columns => s!"UNIQUE ({", ".intercalate columns})"
+  let foreignKeyDefs := foreignKeys.map fun fk =>
+    s!"FOREIGN KEY ({", ".intercalate fk.columns}) " ++
+      s!"REFERENCES {fk.foreignTable} ({", ".intercalate fk.foreignColumns}) " ++
+      s!"ON DELETE {fk.onDelete.sql} ON UPDATE {fk.onUpdate.sql}"
+  let constraints :=
+    (if pkCols.isEmpty || inlineKey.isSome then []
+      else [s!"PRIMARY KEY ({", ".intercalate pkCols})"]) ++ uniqueDefs ++ foreignKeyDefs
+  -- Columns present both before and after keep their data; match old name → new name.
+  let copyPairs := newCols.toList.filterMap fun c => c.source.map (·, c.name)
+  let newNames := ", ".intercalate (copyPairs.map (·.2))
+  let oldNames := ", ".intercalate (copyPairs.map (·.1))
+  let tmp := s!"__db_migrate_{tableName}"
+  -- Foreign key enforcement has to be off across the rebuild: another table referencing this one
+  -- would otherwise block the `DROP TABLE`, and its references would be rewritten to point at the
+  -- temporary table by the rename. The pragma is a no-op inside a transaction, so it is set around
+  -- it, and what it was is restored afterwards.
+  let pragmaRows ← query "PRAGMA foreign_keys"
+  let enforcing := (pragmaRows[0]?.bind (·.text? "foreign_keys")).getD "0" == "1"
+  if enforcing then
+    db.exec "PRAGMA foreign_keys = OFF"
+  try
+    db.transaction do
+      db.exec s!"CREATE TABLE {tmp} (\n  {",\n  ".intercalate (fieldDefs ++ constraints)}\n)"
+      unless copyPairs.isEmpty do
+        db.exec s!"INSERT INTO {tmp} ({newNames}) SELECT {oldNames} FROM {tableName}"
+      db.exec s!"DROP TABLE {tableName}"
+      db.exec s!"ALTER TABLE {tmp} RENAME TO {tableName}"
+      for sql in aux do
+        db.exec sql
+    if enforcing then
+      -- What the pragma would have caught while it was off.
+      let violations ← query "PRAGMA foreign_key_check"
+      unless violations.isEmpty do
+        throw <| IO.userError <|
+          s!"SQLite backend: rebuilding table `{tableName}` left {violations.size} row(s) " ++
+          "violating a foreign key."
+  finally
+    if enforcing then
+      db.exec "PRAGMA foreign_keys = ON"
 
 instance : DBMonadWithMigrations M where
   abort message := throw <| IO.userError s!"SQLite backend: {message}"
@@ -346,7 +431,11 @@ instance : DBMonadWithMigrations M where
   execute op := do
     let db ← read
     match SQL.Migration.Operation.fromDatabaseOperation op with
-    | .createTable cmd => db.exec (cmd.toString .sqlite)
+    | .createTable cmd =>
+      -- Rejected here rather than rendered into a table with a key nobody declared.
+      if let some reason := cmd.sqliteError? then
+        throw <| IO.userError s!"SQLite backend: {reason}"
+      db.exec (cmd.toString .sqlite)
     | .dropTable cmd => db.exec cmd.toString
     | .renameTable cmd => db.exec cmd.toString
     | .alterTable cmd =>

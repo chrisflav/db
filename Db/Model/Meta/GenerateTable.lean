@@ -226,8 +226,13 @@ def generateTable (decl : Name) : CommandElabM Unit := do
       Meta.mkAppOptM ``HasColumn.column #[some type, none]
   let colMap : Expr ←
     liftTermElabM <| fromEnum indexName cols (.const ``Column [])
-  -- The fields of type `AutoKey` make up the primary key, if there are any.
+  -- The field of type `AutoKey`, if there is one, is the primary key. More than one is not a
+  -- schema either backend can create: a generated column has to be the whole primary key.
   let keyFields := names.filter fun (_, type) => type.isConstOf ``AutoKey
+  if keyFields.length > 1 then
+    throwError m!"`{decl}` has more than one `AutoKey` field: \
+      {String.intercalate ", " (keyFields.map (·.1.toString))}. A generated key has to be \
+      the whole primary key, so at most one is allowed."
   -- Construct `Table` and add to environment
   let table : Expr ← liftTermElabM <| do
     let idx : Expr := .const indexName []

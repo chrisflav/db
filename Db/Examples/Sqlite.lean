@@ -443,6 +443,46 @@ def defaultsDemo : Sqlite.M Unit := do
 #guard ({ type := .int, nullable := true, default? := some .null } : Column) ==
   ({ type := .int, nullable := true } : Column)
 
+-- A `CREATE TABLE` carrying `REFERENCES` fails unless its target already exists, so the creations
+-- have to come out in dependency order.
+#guard (((∅ : DatabaseRecipe).operations noteDb.recipe).map fun op =>
+    match op with
+    | .insert name _ => name
+    | _ => "?") == #["note", "note_tag"]
+
+/-- The same schema with the type of a column of each table changed, which SQLite can realise only
+by rebuilding both tables. -/
+def noteDbRebuilt : DatabaseRecipe where
+  tables := noteDb.recipe.tables.map fun name table =>
+    let body : Column := { type := .varchar 100, nullable := false, default? := some (.str "") }
+    let tag : Column := { type := .varchar 20, nullable := false }
+    if name == "note" then { table with columns := table.columns.insert "body" body }
+    else if name == "note_tag" then { table with columns := table.columns.insert "tag" tag }
+    else table
+
+/-- A schema SQLite cannot create: it only generates the value of a column that is exactly its
+`INTEGER PRIMARY KEY`, and here the generated column is not the key. -/
+def badKeyDb : DatabaseRecipe where
+  tables := .ofList
+    [("bad_key",
+      { columns := .ofList
+          [("k", { type := .int, nullable := false }),
+           ("seq", { type := .int, nullable := false, autoIncrement := true })]
+        primaryKey := ["k"] })]
+
+/-- A table whose *name* contains `autoincrement`, which must not be mistaken for a generated key,
+and one whose primary key is a nullable non-integer column, which SQLite really does allow. -/
+def quirkDb : DatabaseRecipe where
+  tables := .ofList
+    [("autoincrement_log",
+      { columns := .ofList [("x", { type := .int, nullable := false })]
+        primaryKey := ["x"] }),
+     ("nullable_key",
+      { columns := .ofList
+          [("x", { type := .varchar 10, nullable := true }),
+           ("y", { type := .int, nullable := false })]
+        primaryKey := ["x"] })]
+
 /-- Exercise the constraints: an auto-incrementing primary key, a composite one, a `UNIQUE` group
 and a cascading foreign key, all of which have to survive introspection, and a constraint change
 that the migration machinery refuses rather than silently ignores. -/
@@ -496,6 +536,48 @@ def constraintsDemo : Sqlite.M Unit := do
   catch e =>
     IO.println s!"Refused, as expected: {e}"
 
+/-- Rebuilding a table must carry its generated key and its foreign keys across, and must not be
+blocked by the foreign keys of the tables referencing it. -/
+def rebuildConstraintsDemo : Sqlite.M Unit := do
+  (← read).exec "PRAGMA foreign_keys = ON"
+  autoUpdate noteDb.recipe
+  DBMonad.insert (d := noteDb) (name := NoteDbIndex.note)
+    { value
+        | .id => none
+        | .body => some "first"
+        | .state => none
+        | .archived => none
+        | .created => none
+        | .tag => none }
+  -- Changing a column's type is an `ALTER COLUMN`, which SQLite realises by rebuilding the table.
+  autoUpdate noteDbRebuilt
+  let current ← currentDatabase
+  IO.println s!"Pending after the rebuild: {(current.operations noteDbRebuilt).size}"
+  IO.println <|
+    s!"Constraint mismatches after the rebuild: {current.constraintMismatches noteDbRebuilt}"
+  let notes ← DBMonad.lookup (Query.all (d := noteDb) .note)
+  IO.println s!"Rows preserved across the rebuild: {notes.size}"
+  -- SQLite cannot generate the value of a column that is not its primary key.
+  try
+    autoUpdate badKeyDb
+    IO.println "A generated non-key column was accepted, which it should not be."
+  catch e =>
+    IO.println s!"Refused, as expected: {e}"
+
+/-- Two shapes the SQLite introspection used to read back wrongly: a table whose name contains
+`autoincrement`, and a nullable non-integer primary key. Both have to reach a fixed point. -/
+def quirkDemo : Sqlite.M Unit := do
+  autoUpdate quirkDb
+  let current ← currentDatabase
+  IO.println s!"Pending for the quirky schema: {(current.operations quirkDb).size}"
+  IO.println s!"Mismatches for the quirky schema: {current.constraintMismatches quirkDb}"
+  -- A foreign key written without naming the referenced columns points at the target's primary
+  -- key, and has to be read back as naming them.
+  (← read).exec "CREATE TABLE par (a integer, b integer, PRIMARY KEY (a, b))"
+  (← read).exec "CREATE TABLE chi (x integer, y integer, FOREIGN KEY (x, y) REFERENCES par)"
+  let keys ← tableForeignKeys "chi"
+  IO.println s!"Implicit reference read back as: {repr (keys.map (·.foreignColumns))}"
+
 /-- Initial schema: a `widget` table whose `label` is a nullable `varchar(50)`, next to a column
 with an expression default. -/
 def widgetV1 : DatabaseRecipe where
@@ -546,6 +628,8 @@ def test : IO Unit := do
   Sqlite.runDB ":memory:" shapeDemo
   Sqlite.runDB ":memory:" defaultsDemo
   Sqlite.runDB ":memory:" constraintsDemo
+  Sqlite.runDB ":memory:" rebuildConstraintsDemo
+  Sqlite.runDB ":memory:" quirkDemo
   Sqlite.runDB ":memory:" migrationDemo
 
 end SqliteExample
