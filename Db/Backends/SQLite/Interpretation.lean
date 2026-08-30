@@ -78,40 +78,62 @@ def query (sql : String) : M (Array Row) := do
     rows := rows.push row
   return rows
 
+/-- Decode the rows of a result into the entries of `view`.
+
+A row whose columns cannot all be decoded is an error rather than a row to skip: dropping it would
+answer the query with silently fewer rows than it matched. -/
+def decodeRows {d : Database} (view : View d) (rows : Array Row) : M (Array view.Entry) :=
+  rows.mapM fun row => do
+    let mut map := default
+    for idx in Enum.all view.Index do
+      let name := s!"{idx}"
+      let some raw := row.get? name
+        | throw (IO.userError s!"SQLite backend: the result has no column `{name}`.")
+      let some val := (view.name idx).column.ofRawValue? raw
+        | throw (IO.userError
+            s!"SQLite backend: cannot read {repr raw} as a value of column `{name}`.")
+      map := map.insert idx val
+    let some value := Enum.fromHashMap? map
+      | throw (IO.userError "SQLite backend: the result is missing a column.")
+    return { value := value }
+
 instance (d : Database) : DBMonad d M where
   lookup {view} q := do
     let sql : SQL.Select := .fromQuery q
-    let rows ← query sql.toString
-    -- A row whose columns cannot all be decoded is an error rather than a row to skip: dropping it
-    -- would answer the query with silently fewer rows than it matched.
-    rows.mapM fun row => do
-      let mut map := default
-      for idx in Enum.all view.Index do
-        let name := s!"{idx}"
-        let some raw := row.get? name
-          | throw (IO.userError s!"SQLite backend: the result has no column `{name}`.")
-        let some val := (view.name idx).column.ofRawValue? raw
-          | throw (IO.userError
-              s!"SQLite backend: cannot read {repr raw} as a value of column `{name}`.")
-        map := map.insert idx val
-      let some value := Enum.fromHashMap? map
-        | throw (IO.userError "SQLite backend: the result is missing a column.")
-      return { value := value }
+    decodeRows view (← query sql.toString)
   insert {table} data := do
     let db ← read
     let sql : SQL.Insert := .fromInsert data
     db.exec sql.toString
-  delete {view} e := do
+  insertReturning {table} data := do
+    let sql : SQL.Insert := { SQL.Insert.fromInsert data with returning := true }
+    decodeRows (Table.view table) (← query sql.toString)
+  update {table} upd := do
     let db ← read
-    match SQL.Delete.fromCondition e with
-    | some del =>
-      db.exec del.toString
-      -- `changes` reports the number of rows affected by the last `DELETE`.
-      return (← db.changes).toInt.toNat
-    | none =>
-      throw <| IO.userError <|
-        "SQLite backend: `delete` requires a condition over a single table; " ++
-        "the given view references columns from multiple tables."
+    let sql : SQL.Update := .fromUpdate upd
+    -- An `UPDATE` with no assignment is not a statement; it also changes nothing.
+    if sql.assignments.isEmpty then
+      return 0
+    db.exec sql.toString
+    -- `changes` reports the number of rows affected by the last statement.
+    return (← db.changes).toInt.toNat
+  updateReturning {table} upd := do
+    let sql : SQL.Update := { SQL.Update.fromUpdate upd with returning := true }
+    if sql.assignments.isEmpty then
+      return #[]
+    decodeRows (Table.view table) (← query sql.toString)
+  delete {table} del := do
+    let db ← read
+    let sql : SQL.Delete := .fromDelete del
+    db.exec sql.toString
+    return (← db.changes).toInt.toNat
+  deleteReturning {table} del := do
+    let sql : SQL.Delete := { SQL.Delete.fromDelete del with returning := true }
+    decodeRows (Table.view table) (← query sql.toString)
+
+instance : DBMonadTransactional M where
+  -- `SQLite.transaction` commits when the action returns and rolls back when it throws.
+  withTransaction x := fun db => db.transaction (x.run db)
 
 /-- Whether `needle` occurs in `haystack` as a whole word, i.e. not as part of a longer
 identifier. Both are compared as given, so the caller upper-cases them. -/

@@ -218,6 +218,36 @@ table is not migrated**. Rather than applying such a migration as a silent no-op
 aborts and names the tables whose constraints differ; migrate those by hand, or drop and recreate
 them.
 
+## Writing
+
+`DBMonad` covers the four statements, each in a plain form and one that returns the affected rows:
+
+| | | |
+| --- | --- | --- |
+| `lookup` | `q : Query d view` | `Array view.Entry` |
+| `insert` / `insertReturning` | `d.Insert name` | `Unit` / the rows stored |
+| `update` / `updateReturning` | `d.Update name` | rows changed / the rows as they now are |
+| `delete` / `deleteReturning` | `d.Delete name` | rows deleted / the rows as they last were |
+
+`Database.Update` sets each column to the value of an expression over the row being updated, or
+leaves it alone, on the rows a condition matches. `Database.Delete` names the table it deletes from
+rather than deriving it from the columns its condition happens to mention: SQL deletes from one
+table, and a condition over a join view names columns that are only in scope inside a subquery.
+
+The model layer wraps these as `HasModel.insertReturning`, `.update`, `.updateReturning`, `.delete`
+and `.deleteReturning`. `insertReturning` is how the value of a column the database generates is
+obtained without a second query:
+
+```lean4
+let tag ← HasModel.insertReturning ({ id := 0, label := v"urgent" } : Tag)
+IO.println s!"the database assigned id {tag.id}"
+```
+
+`DBMonadTransactional.withTransaction` groups several operations into one atomic unit, committing
+if the block succeeds and rolling back if it fails. On PostgreSQL only a failure of the backend's
+own exception type rolls back; an `IO` error thrown underneath escapes with the transaction still
+open.
+
 ## Usage
 
 Add this dependency to your project's `lakefile.toml`:

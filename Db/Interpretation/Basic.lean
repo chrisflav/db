@@ -14,10 +14,28 @@ structure Interpretation (query : Type) where
 class DBMonad (d : Database) (m : Type → Type) where
   /-- Lookup the given query on the database. -/
   lookup {view : View d} (q : Query d view) : m (Array view.Entry)
-  /-- Insert the given data into the database. Return true if successful, false otherwise. -/
+  /-- Insert the given data into the database. -/
   insert {name : d.Index} (data : d.Insert name) : m Unit
-  /-- Delete rows matching the expression. Return number of deleted rows. -/
-  delete {view : View d} (e : DBExpr d view .bool) : m Nat
+  /-- Insert the given data and return the rows the database stored, which is how the value of a
+  generated column is obtained without a second query. -/
+  insertReturning {name : d.Index} (data : d.Insert name) : m (Array (Table.view name).Entry)
+  /-- Apply the update. Return the number of rows changed. -/
+  update {name : d.Index} (upd : d.Update name) : m Nat
+  /-- Apply the update and return the rows as they now are. -/
+  updateReturning {name : d.Index} (upd : d.Update name) : m (Array (Table.view name).Entry)
+  /-- Delete the rows the condition matches. Return the number of rows deleted. -/
+  delete {name : d.Index} (del : d.Delete name) : m Nat
+  /-- Delete the rows the condition matches and return them as they last were. -/
+  deleteReturning {name : d.Index} (del : d.Delete name) : m (Array (Table.view name).Entry)
+
+/--
+A monad in which several database operations can be grouped into one atomic unit: either all of
+them take effect or none of them do.
+-/
+class DBMonadTransactional (m : Type → Type) where
+  /-- Run `x` inside a transaction, committing it if `x` succeeds and rolling it back if it
+  fails. -/
+  withTransaction {α : Type} (x : m α) : m α
 
 class DBMonadWithMigrations (m : Type → Type) where
   [dbMonad (d : Database) : DBMonad d m]
