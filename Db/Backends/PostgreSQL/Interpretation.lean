@@ -24,6 +24,8 @@ inductive Exception where
   | fatal
   /-- A value the database returned could not be read as the type the view declares for it. -/
   | decodeError (message : String)
+  /-- A migration that cannot be carried out. -/
+  | migrationError (message : String)
   deriving Repr
 
 structure State where
@@ -79,6 +81,8 @@ structure InformationSchema where
   table_name : VarChar 100
   column_name : VarChar 100
   is_nullable : Bool
+  /-- Whether PostgreSQL generates this column's value, i.e. it was declared `AS IDENTITY`. -/
+  is_identity : Bool
   data_type : VarChar 100
   -- TODO: add `DBType.nat` and change this to `Nat`
   character_maximum_length : Option Int
@@ -102,8 +106,12 @@ def InformationSchema.column (info : InformationSchema) : Option Column := do
   pure
     { type := dbtype
       nullable := info.is_nullable
-      default? := info.column_default.bind fun d =>
-        SQL.ColumnDefault.parse? dbtype (SQL.stripCast d) }
+      -- The sequence an identity column draws from is not a default anyone declares.
+      default? :=
+        if info.is_identity then none
+        else info.column_default.bind fun d =>
+          SQL.ColumnDefault.parse? dbtype (SQL.stripCast d)
+      autoIncrement := info.is_identity }
 
 generate_table PostgreSQL.InformationSchema
 
@@ -130,12 +138,80 @@ abbrev catalog : Database where
 def InformationSchema.model : Model catalog InformationSchema where
   index := .information_schema
 
+/-- Run a statement and return its rows, in which `none` is SQL's `NULL`. Used for the catalogue
+queries, which have no `DBType` counterpart for every column they return. -/
+def query (sql : String) : M (Array (Std.HashMap String (Option String))) := do
+  let conn := (← get).connection
+  match ← conn.exec sql with
+  | .data data => return data.optRows
+  | .success => return #[]
+  | .failure err =>
+    IO.println s!"Error {repr err}"
+    throw .fatal
+
+/-- Parse the single-letter referential action `pg_constraint` reports. -/
+def parseForeignKeyAction (s : String) : ForeignKeyAction :=
+  match s with
+  | "r" => .restrict
+  | "c" => .cascade
+  | "n" => .setNull
+  | "d" => .setDefault
+  | _ => .noAction
+
+/--
+The primary key, unique groups and foreign keys of every table of the `public` schema.
+
+Read from `pg_constraint` rather than `information_schema`: the standard views report the
+referencing and the referenced columns of a foreign key in two separate rows sets that cannot be
+paired reliably, whereas `conkey` and `confkey` are ordered arrays that can.
+-/
+def catalogConstraints :
+    M (Std.HashMap String (List String × List (List String) × List (ForeignKey String))) := do
+  let rows ← query <|
+    "SELECT rel.relname AS tbl, c.contype AS kind, " ++
+    "coalesce(frel.relname, '') AS ftbl, c.confdeltype AS del, c.confupdtype AS upd, " ++
+    "(SELECT coalesce(string_agg(a.attname, ',' ORDER BY k.ord), '') " ++
+    " FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) " ++
+    " JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum) AS cols, " ++
+    "(SELECT coalesce(string_agg(a.attname, ',' ORDER BY k.ord), '') " ++
+    " FROM unnest(coalesce(c.confkey, '{}')) WITH ORDINALITY AS k(attnum, ord) " ++
+    " JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.attnum) AS fcols " ++
+    "FROM pg_constraint c " ++
+    "JOIN pg_class rel ON rel.oid = c.conrelid " ++
+    "LEFT JOIN pg_class frel ON frel.oid = c.confrelid " ++
+    "JOIN pg_namespace n ON n.oid = rel.relnamespace " ++
+    "WHERE n.nspname = 'public' AND c.contype IN ('p', 'u', 'f') " ++
+    "ORDER BY rel.relname, c.conname"
+  let mut res : Std.HashMap String (List String × List (List String) × List (ForeignKey String)) :=
+    ∅
+  for row in rows do
+    let (some tbl, some kind, some cols) := (row.get? "tbl" >>= id, row.get? "kind" >>= id,
+      row.get? "cols" >>= id) | continue
+    let columns := (cols.splitOn ",").filter (· != "")
+    let (primaryKey, unique, foreignKeys) := res.getD tbl ([], [], [])
+    match kind with
+    | "p" => res := res.insert tbl (columns, unique, foreignKeys)
+    | "u" => res := res.insert tbl (primaryKey, unique ++ [columns], foreignKeys)
+    | _ =>
+      let foreignColumns := ((row.get? "fcols" >>= id).getD "").splitOn ","
+      let fk : ForeignKey String :=
+        { columns := columns
+          foreignTable := ((row.get? "ftbl" >>= id).getD "")
+          foreignColumns := foreignColumns.filter (· != "")
+          onDelete := parseForeignKeyAction ((row.get? "del" >>= id).getD "a")
+          onUpdate := parseForeignKeyAction ((row.get? "upd" >>= id).getD "a") }
+      res := res.insert tbl (primaryKey, unique, foreignKeys ++ [fk])
+  return res
+
 instance : DBMonadWithMigrations M where
+  abort message := do
+    IO.println s!"PostgreSQL backend: {message}"
+    throw <| .migrationError message
   execute operation := do
     let conn := (← get).connection
     let sql : SQL.Migration.Operation := .fromDatabaseOperation operation
-    IO.println s!"Executing {sql.toString}"
-    let res ← conn.exec sql.toString
+    IO.println s!"Executing {sql.toString .postgres}"
+    let res ← conn.exec (sql.toString .postgres)
     match res with
     | .failure err =>
       IO.println s!"Error {repr err}"
@@ -151,16 +227,19 @@ instance : DBMonadWithMigrations M where
                      (.str (v"public")))
         (.all _)
     let infos ← q.fetch
-    let mut tables := .emptyWithCapacity
+    let constraints ← catalogConstraints
+    let mut tables : Std.HashMap String TableRecipe := .emptyWithCapacity
     for info in infos do
       if let some col := info.column then
-      let table ← do
-        if h : info.table_name.val ∈ tables then
-          pure <| tables[info.table_name.val].columns.insert
-            info.column_name.val col
-        else
-          pure <| { (info.column_name.val, col) }
-      tables := tables.insert info.table_name.val { columns := table }
+      let name := info.table_name.val
+      let (primaryKey, unique, foreignKeys) := constraints.getD name ([], [], [])
+      let columns :=
+        (tables.getD name { columns := ∅ }).columns.insert info.column_name.val col
+      tables := tables.insert name
+        { columns := columns
+          primaryKey := primaryKey
+          unique := unique
+          foreignKeys := foreignKeys }
     return { tables := tables }
 
 end PostgreSQL

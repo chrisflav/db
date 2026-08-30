@@ -76,7 +76,7 @@ def ins2 : SQL.Insert :=
         | .length => some (56 : Int) }
 
 example : String :=
-  SQL.Migration.CreateTable.toString (.fromTable fish "fish")
+  SQL.Migration.CreateTable.toString .sqlite (.fromTable fish "fish")
 
 inductive Fish2Index where
   | name

@@ -27,6 +27,8 @@ class DBMonadWithMigrations (m : Type → Type) where
   currentDatabase : m DatabaseRecipe
   /- Execute the given operation. -/
   execute (op : DatabaseOperation) : m Unit
+  /-- Give up on a migration that cannot be carried out, reporting why. -/
+  abort {α : Type} (message : String) : m α
 
 namespace DBMonadWithMigrations
 
@@ -40,9 +42,19 @@ def executeMany (operations : Array DatabaseOperation) : m Unit := do
 def init (database : DatabaseRecipe) : m Unit := do
   executeMany <| DatabaseRecipe.operations ∅ database
 
-/-- Automatically update the current database schema to match `target`. -/
+/-- Automatically update the current database schema to match `target`.
+
+The operation language describes column changes only, so a table whose constraints differ from the
+target aborts the migration instead of being brought into a state that only looks like the target
+schema. -/
 def autoUpdate (target : DatabaseRecipe) : m Unit := do
   let source ← currentDatabase
+  letI mismatches := source.constraintMismatches target
+  unless mismatches.isEmpty do
+    abort <|
+      s!"the constraints of the table(s) {", ".intercalate mismatches.toList} differ from those " ++
+        "of the target schema. A constraint change on an existing table is not migrated; " ++
+        "migrate these by hand, or drop and recreate the tables."
   executeMany <| source.operations target
 
 end DBMonadWithMigrations

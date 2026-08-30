@@ -52,7 +52,35 @@ causes universe issues with monads.
 -/
 structure TableRecipe : Type where
   columns : Std.HashMap String Column
-  deriving Repr, BEq
+  /-- The names of the primary key columns, in order. Empty for a table without one. -/
+  primaryKey : List String := []
+  /-- The groups of column names that have to be unique together. -/
+  unique : List (List String) := []
+  /-- The foreign keys of the table. -/
+  foreignKeys : List (ForeignKey String) := []
+  deriving Repr
+
+/--
+The constraints of a table in a normal form.
+
+A `UNIQUE` group and the list of groups and of foreign keys have no meaningful order, and a
+database does not report them in the order the table declared them, so they are compared sorted.
+The primary key does keep its order, which is part of what it means.
+-/
+def TableRecipe.normalizedConstraints (recipe : TableRecipe) :
+    List String × List String × List String :=
+  (recipe.primaryKey,
+   (recipe.unique.map fun group =>
+      ", ".intercalate (group.mergeSort fun a b => decide (a ≤ b))).mergeSort
+        (fun a b => decide (a ≤ b)),
+   (recipe.foreignKeys.map fun fk =>
+      s!"({", ".intercalate fk.columns}) -> {fk.foreignTable}" ++
+        s!"({", ".intercalate fk.foreignColumns}) " ++
+        s!"ON DELETE {fk.onDelete.sql} ON UPDATE {fk.onUpdate.sql}").mergeSort
+          (fun a b => decide (a ≤ b)))
+
+instance : BEq TableRecipe where
+  beq s t := s.columns == t.columns && s.normalizedConstraints == t.normalizedConstraints
 
 /--
 The minimal data required for defining a database. This is less convenient to work with, because
@@ -71,10 +99,20 @@ def DatabaseRecipe.Index (recipe : DatabaseRecipe) : Type :=
   recipe.tables.IndexType
   deriving Indexing
 
-/-- A reconstructed table from a table recipe. -/
+/-- A reconstructed table from a table recipe. A constraint naming a column the recipe does not
+have is dropped, there being no index to name it by. -/
 def TableRecipe.table (recipe : TableRecipe) : Table where
   Index := recipe.Index
   columns (i : Fin _) := recipe.columns[recipe.columns.keys[i]]'(by grind)
+  primaryKey := recipe.primaryKey.filterMap FromString.fromString
+  unique := recipe.unique.map fun group => group.filterMap FromString.fromString
+  foreignKeys := recipe.foreignKeys.filterMap fun fk => do
+    let columns ← fk.columns.mapM FromString.fromString
+    return { columns := columns
+             foreignTable := fk.foreignTable
+             foreignColumns := fk.foreignColumns
+             onDelete := fk.onDelete
+             onUpdate := fk.onUpdate }
 
 /-- A reconstructed database from a database recipe. -/
 def DatabaseRecipe.table (recipe : DatabaseRecipe) : Database where
@@ -85,6 +123,9 @@ def DatabaseRecipe.table (recipe : DatabaseRecipe) : Database where
 def Table.recipe (table : Table) : TableRecipe where
   columns := .ofArray <|
     (Enum.all table.Index).map fun idx => (toString idx, table.columns idx)
+  primaryKey := table.primaryKey.map toString
+  unique := table.unique.map fun group => group.map toString
+  foreignKeys := table.foreignKeys.map (ForeignKey.map toString)
 
 def Database.recipe (database : Database) : DatabaseRecipe where
   tables := .ofArray <|
@@ -124,7 +165,7 @@ instance : HasOperations TableRecipe TableOperation where
   isValid table op :=
     HasExecution.isValid table.columns op
   execute recipe op valid :=
-    { columns := HasExecution.execute recipe.columns op valid }
+    { recipe with columns := HasExecution.execute recipe.columns op valid }
   operations source target := HasOperations.operations source.columns target.columns
 
 abbrev DatabaseOperation : Type :=
@@ -151,6 +192,19 @@ def TableRecipe.operations (source target : TableRecipe) :
 def DatabaseRecipe.operations (source target : DatabaseRecipe) :
     Array DatabaseOperation :=
   HasOperations.operations source target
+
+/-- The names of the tables that exist in both schemas but declare different constraints.
+
+The operation language describes column changes only, so a constraint change on an existing table
+cannot be migrated; reporting it is what keeps it from being applied silently as a no-op. -/
+def DatabaseRecipe.constraintMismatches (source target : DatabaseRecipe) : Array String :=
+  Id.run do
+    let mut res := #[]
+    for (name, targetTable) in target.tables.toList do
+      if let some sourceTable := source.tables[name]? then
+        unless sourceTable.normalizedConstraints == targetTable.normalizedConstraints do
+          res := res.push name
+    return res
 
 /-- A recipe for a migration valid for the database configuration `source`. -/
 structure MigrationRecipe (source : DatabaseRecipe) where

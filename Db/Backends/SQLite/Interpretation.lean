@@ -113,6 +113,15 @@ instance (d : Database) : DBMonad d M where
         "SQLite backend: `delete` requires a condition over a single table; " ++
         "the given view references columns from multiple tables."
 
+/-- Parse the referential action SQLite reports for a foreign key. -/
+def parseForeignKeyAction (s : String) : ForeignKeyAction :=
+  match s.toUpper with
+  | "RESTRICT" => .restrict
+  | "CASCADE" => .cascade
+  | "SET NULL" => .setNull
+  | "SET DEFAULT" => .setDefault
+  | _ => .noAction
+
 /-- Parse a SQLite declared column type back into a `DBType`. SQLite preserves the declared type
 string, so the types emitted by `DBType.toString` (`integer`, `varchar(n)`, `bool`) round-trip. -/
 def parseDBType (s : String) : Option DBType :=
@@ -247,36 +256,97 @@ def rebuildTable (tableName : String) (commands : List AlterTableCommand) : M Un
     for sql in aux do
       db.exec sql
 
+/-- The columns, primary key and auto-increment flag of `tableName`, as `pragma_table_info` and the
+`CREATE TABLE` text report them. -/
+def tableColumns (tableName : String) : M (Std.HashMap String Column × List String) := do
+  -- SQLite records `AUTOINCREMENT` nowhere but in the text of the `CREATE TABLE`.
+  let tableRows ← query <|
+    s!"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{tableName}'"
+  let declaration := (tableRows[0]?.bind (·.text? "sql")).getD ""
+  let autoIncrement := (declaration.toUpper.splitOn "AUTOINCREMENT").length > 1
+  let rows ← query <|
+    s!"SELECT name AS nm, type AS ty, [notnull] AS nn, pk, dflt_value AS dv " ++
+    s!"FROM pragma_table_info('{tableName}') ORDER BY cid"
+  let mut columns : Std.HashMap String Column := ∅
+  let mut key : Array (Nat × String) := #[]
+  for row in rows do
+    let (some col, some ty) := (row.text? "nm", row.text? "ty") | continue
+    -- Skipping a column we cannot represent would make the reported schema disagree with the
+    -- database, and the migration derived from it would then fail against the real table.
+    let some dbtype := parseDBType ty
+      | throw <| IO.userError <|
+          s!"SQLite backend: column `{col}` of table `{tableName}` has type `{ty}`, which has " ++
+          "no `DBType` counterpart, so the current schema cannot be represented."
+    let position := (row.textD "pk" "0").toNat?.getD 0
+    if position > 0 then
+      key := key.push (position, col)
+    -- `notnull` is `1` for a `NOT NULL` column, `0` otherwise. SQLite reports `0` for an
+    -- `INTEGER PRIMARY KEY`, which is the rowid and cannot be null all the same.
+    let nullable := row.textD "nn" "0" == "0" && position == 0
+    let default? := (row.text? "dv").bind (SQL.ColumnDefault.parse? dbtype)
+    columns := columns.insert col
+      { type := dbtype, nullable := nullable, default? := default?
+        autoIncrement := autoIncrement && position == 1 && dbtype == .int }
+  let sortedKey := (key.toList.mergeSort (fun a b => decide (a.1 ≤ b.1))).map (·.2)
+  return (columns, sortedKey)
+
+/-- The groups of columns of `tableName` that a `UNIQUE` constraint holds together. The index
+SQLite creates for the primary key has origin `pk` rather than `u` and is not one of them. -/
+def tableUnique (tableName : String) : M (List (List String)) := do
+  let indexRows ← query <|
+    s!"SELECT name AS nm FROM pragma_index_list('{tableName}') WHERE origin = 'u' ORDER BY name"
+  let mut res : List (List String) := []
+  for indexRow in indexRows do
+    let some indexName := indexRow.text? "nm" | continue
+    let columnRows ← query <|
+      s!"SELECT name AS nm FROM pragma_index_info('{indexName}') ORDER BY seqno"
+    res := (columnRows.toList.filterMap (·.text? "nm")) :: res
+  return res.reverse
+
+/-- The foreign keys of `tableName`. `pragma_foreign_key_list` reports one row per referencing
+column, which the `id` column groups into keys and `seq` orders within a key. -/
+def tableForeignKeys (tableName : String) : M (List (ForeignKey String)) := do
+  let rows ← query <|
+    s!"SELECT id, seq, [table] AS ftbl, [from] AS col, [to] AS fcol, on_delete AS od, " ++
+    s!"on_update AS ou FROM pragma_foreign_key_list('{tableName}') ORDER BY id, seq"
+  let mut byId : Std.HashMap String (ForeignKey String) := ∅
+  let mut order : Array String := #[]
+  for row in rows do
+    let (some id, some ftbl, some col) := (row.text? "id", row.text? "ftbl", row.text? "col")
+      | continue
+    let fcol := row.textD "fcol" col
+    match byId[id]? with
+    | some fk =>
+      byId := byId.insert id
+        { fk with columns := fk.columns ++ [col], foreignColumns := fk.foreignColumns ++ [fcol] }
+    | none =>
+      order := order.push id
+      byId := byId.insert id
+        { columns := [col], foreignTable := ftbl, foreignColumns := [fcol]
+          onDelete := parseForeignKeyAction (row.textD "od" "")
+          onUpdate := parseForeignKeyAction (row.textD "ou" "") }
+  return order.toList.filterMap (byId[·]?)
+
 instance : DBMonadWithMigrations M where
+  abort message := throw <| IO.userError s!"SQLite backend: {message}"
   currentDatabase := do
-    -- The SQLite analogue of `information_schema.columns`.
-    let rows ← query <|
-      "SELECT m.name AS tbl, p.name AS col, p.type AS ty, p.[notnull] AS nn, " ++
-      "p.dflt_value AS dv " ++
-      "FROM sqlite_master m JOIN pragma_table_info(m.name) p " ++
-      "WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%' " ++
-      "ORDER BY m.name, p.cid"
+    let tableRows ← query <|
+      "SELECT name AS nm FROM sqlite_master " ++
+      "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
     let mut tables : Std.HashMap String TableRecipe := ∅
-    for row in rows do
-      if let (some tbl, some col, some ty) :=
-          (row.text? "tbl", row.text? "col", row.text? "ty") then
-        -- Skipping a column we cannot represent would make the reported schema disagree with the
-        -- database, and the migration derived from it would then fail against the real table.
-        let some dbtype := parseDBType ty
-          | throw <| IO.userError <|
-              s!"SQLite backend: column `{col}` of table `{tbl}` has type `{ty}`, which has no " ++
-              "`DBType` counterpart, so the current schema cannot be represented."
-        -- `notnull` is `1` for a `NOT NULL` column, `0` otherwise.
-        let nullable := row.textD "nn" "0" == "0"
-        let default? := (row.text? "dv").bind (SQL.ColumnDefault.parse? dbtype)
-        let column : Column := { type := dbtype, nullable := nullable, default? := default? }
-        let existing := (tables.getD tbl { columns := ∅ }).columns
-        tables := tables.insert tbl { columns := existing.insert col column }
+    for tableRow in tableRows do
+      let some name := tableRow.text? "nm" | continue
+      let (columns, primaryKey) ← tableColumns name
+      tables := tables.insert name
+        { columns := columns
+          primaryKey := primaryKey
+          unique := ← tableUnique name
+          foreignKeys := ← tableForeignKeys name }
     return { tables := tables }
   execute op := do
     let db ← read
     match SQL.Migration.Operation.fromDatabaseOperation op with
-    | .createTable cmd => db.exec cmd.toString
+    | .createTable cmd => db.exec (cmd.toString .sqlite)
     | .dropTable cmd => db.exec cmd.toString
     | .renameTable cmd => db.exec cmd.toString
     | .alterTable cmd =>
@@ -301,6 +371,6 @@ instance : DBMonadWithMigrations M where
         rebuildTable cmd.tableName cmd.commands
       else
         for command in cmd.commands do
-          db.exec s!"ALTER TABLE {cmd.tableName} {command.toString}"
+          db.exec s!"ALTER TABLE {cmd.tableName} {command.toString .sqlite}"
 
 end Sqlite
