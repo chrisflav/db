@@ -26,6 +26,14 @@ structure Book where
   year : Option Int
   deriving Repr
 
+/-- A tag, whose `id` the database assigns: `AutoKey` makes it a single-column auto-incrementing
+primary key, which an insert leaves out. -/
+@[model (dbName := "tag") mydb]
+structure Tag where
+  id : AutoKey
+  label : VarChar 50
+  deriving Repr
+
 open HasModel DBMonadWithMigrations
 
 def mike : Author where

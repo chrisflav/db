@@ -313,23 +313,61 @@ instance : Indexing NoteIndex where
 def noteTable : Table where
   Index := NoteIndex
   columns
-    | .id => { type := .int, nullable := false }
+    | .id => { type := .int, nullable := false, autoIncrement := true }
     | .body => { type := .text, nullable := false, default? := some (.str "") }
     | .state => { type := .varchar 20, nullable := false, default? := some (.str "open") }
     | .archived => { type := .bool, nullable := false, default? := some (.bool false) }
     | .created => { type := .int, nullable := false, default? := some (.call "unixepoch()") }
     | .tag => { type := .text, nullable := true }
+  primaryKey := [.id]
+  unique := [[.body, .state]]
+
+/-- A join table: its two columns are its primary key together, and the first references `note`,
+so deleting a note deletes the rows tagging it. -/
+inductive NoteTagIndex where
+  | noteId
+  | tag
+  deriving DecidableEq, Hashable, Repr, Enum
+
+instance : ToString NoteTagIndex where
+  toString
+    | .noteId => "note_id"
+    | .tag => "tag"
+
+instance : FromString NoteTagIndex where
+  fromString
+    | "note_id" => some .noteId
+    | "tag" => some .tag
+    | _ => none
+
+instance : Indexing NoteTagIndex where
+
+def noteTagTable : Table where
+  Index := NoteTagIndex
+  columns
+    | .noteId => { type := .int, nullable := false }
+    | .tag => { type := .varchar 50, nullable := false }
+  primaryKey := [.noteId, .tag]
+  foreignKeys :=
+    [{ columns := [.noteId]
+       foreignTable := "note"
+       foreignColumns := ["id"]
+       onDelete := .cascade }]
 
 inductive NoteDbIndex where
   | note
+  | noteTag
   deriving DecidableEq, Hashable, Repr, Enum
 
 instance : ToString NoteDbIndex where
-  toString | .note => "note"
+  toString
+    | .note => "note"
+    | .noteTag => "note_tag"
 
 instance : FromString NoteDbIndex where
   fromString
     | "note" => some .note
+    | "note_tag" => some .noteTag
     | _ => none
 
 instance : Indexing NoteDbIndex where
@@ -338,6 +376,12 @@ def noteDb : Database where
   Index := NoteDbIndex
   tables
     | .note => noteTable
+    | .noteTag => noteTagTable
+
+/-- The same schema with a different `UNIQUE` constraint, to migrate towards. -/
+def noteDbAltered : DatabaseRecipe where
+  tables := noteDb.recipe.tables.map fun name table =>
+    if name == "note" then { table with unique := [["tag"]] } else table
 
 /-- Exercise unbounded text and column defaults: create the schema, insert a row that omits every
 column the database can fill in, insert one that supplies them, and confirm that the empty string
@@ -394,9 +438,63 @@ def defaultsDemo : Sqlite.M Unit := do
 -- `DEFAULT NULL` supplies nothing a `NOT NULL` column can use, so it does not make one omittable,
 -- and it declares nothing a column without a default does not already do, which is why PostgreSQL
 -- discards it and the two have to compare equal.
-#guard !(Column.mk .int false (some .null)).isOptional
-#guard (Column.mk .int false (some (.int 0))).isOptional
-#guard (Column.mk .int true (some .null)) == (Column.mk .int true none)
+#guard !({ type := .int, nullable := false, default? := some .null } : Column).isOptional
+#guard ({ type := .int, nullable := false, default? := some (.int 0) } : Column).isOptional
+#guard ({ type := .int, nullable := true, default? := some .null } : Column) ==
+  ({ type := .int, nullable := true } : Column)
+
+/-- Exercise the constraints: an auto-incrementing primary key, a composite one, a `UNIQUE` group
+and a cascading foreign key, all of which have to survive introspection, and a constraint change
+that the migration machinery refuses rather than silently ignores. -/
+def constraintsDemo : Sqlite.M Unit := do
+  -- SQLite only enforces foreign keys when asked to.
+  (← read).exec "PRAGMA foreign_keys = ON"
+  autoUpdate noteDb.recipe
+  DBMonad.insert (d := noteDb) (name := NoteDbIndex.note)
+    { value
+        | .id => none
+        | .body => some "first"
+        | .state => none
+        | .archived => none
+        | .created => none
+        | .tag => none }
+  DBMonad.insert (d := noteDb) (name := NoteDbIndex.note)
+    { value
+        | .id => none
+        | .body => some "second"
+        | .state => none
+        | .archived => none
+        | .created => none
+        | .tag => none }
+  -- The ids were assigned by the database, the insert having left them out.
+  let notes ← DBMonad.lookup (Query.all (d := noteDb) .note)
+  IO.println "Notes with generated ids:"
+  for row in notes do
+    let body : String := row.value .body
+    let id : Int := row.value .id
+    IO.println s!"  id={id} body={body}"
+  for note in notes do
+    DBMonad.insert (d := noteDb) (name := NoteDbIndex.noteTag)
+      { value
+          | .noteId => some ((note.value .id : Int))
+          | .tag => some (v"urgent") }
+  IO.println s!"Tag rows: {(← DBMonad.lookup (Query.all (d := noteDb) .noteTag)).size}"
+  -- `ON DELETE CASCADE`: deleting a note takes its tag rows with it.
+  let first : DBExpr noteDb (Table.view NoteDbIndex.note) .bool :=
+    .eq (.var NoteIndex.id .int) (.int 1)
+  IO.println s!"Deleted notes: {← DBMonad.delete (d := noteDb) first}"
+  let remaining ← DBMonad.lookup (Query.all (d := noteDb) .noteTag)
+  IO.println s!"Tag rows after the cascade: {remaining.size}"
+  -- The constraints have to survive introspection too.
+  let pending := (← currentDatabase).operations noteDb.recipe
+  IO.println s!"Pending operations after creating the schema: {pending.size}"
+  IO.println s!"Constraint mismatches: {(← currentDatabase).constraintMismatches noteDb.recipe}"
+  -- A constraint change on an existing table is reported rather than silently skipped.
+  try
+    autoUpdate noteDbAltered
+    IO.println "Migrating the changed UNIQUE constraint was accepted, which it should not be."
+  catch e =>
+    IO.println s!"Refused, as expected: {e}"
 
 /-- Initial schema: a `widget` table whose `label` is a nullable `varchar(50)`, next to a column
 with an expression default. -/
@@ -447,6 +545,7 @@ def test : IO Unit := do
   Sqlite.runDB ":memory:" operatorDemo
   Sqlite.runDB ":memory:" shapeDemo
   Sqlite.runDB ":memory:" defaultsDemo
+  Sqlite.runDB ":memory:" constraintsDemo
   Sqlite.runDB ":memory:" migrationDemo
 
 end SqliteExample

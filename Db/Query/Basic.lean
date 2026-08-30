@@ -143,6 +143,9 @@ structure Column where
   nullable : Bool
   /-- The value the database fills in when an insert omits this column. -/
   default? : Option ColumnDefault := none
+  /-- Whether the database generates this column's value when an insert omits it. Both backends
+  only support this for a single-column integer primary key. -/
+  autoIncrement : Bool := false
   deriving Repr, Hashable, DecidableEq
 
 /--
@@ -156,7 +159,7 @@ fixed point.
 -/
 instance : BEq Column where
   beq c₁ c₂ :=
-    c₁.type == c₂.type && c₁.nullable == c₂.nullable &&
+    c₁.type == c₂.type && c₁.nullable == c₂.nullable && c₁.autoIncrement == c₂.autoIncrement &&
       match c₁.default?, c₂.default? with
       | some (.call _), some (.call _) => true
       -- A column with no default already defaults to `NULL`, so `DEFAULT NULL` declares nothing.
@@ -166,12 +169,12 @@ instance : BEq Column where
       | d₁, d₂ => d₁ == d₂
 
 /-- Whether an insert may leave this column out, because the database can supply a value for it:
-either its declared default, or `NULL`.
+its declared default, a generated one, or `NULL`.
 
 A `DEFAULT NULL` supplies nothing a `NOT NULL` column could use, so it does not make one
 omittable. -/
 def Column.isOptional (c : Column) : Bool :=
-  c.nullable ||
+  c.nullable || c.autoIncrement ||
     match c.default? with
     | some .null => false
     | some _ => true
@@ -201,12 +204,62 @@ def Column.ofRawValue? : (col : Column) → Option String → Option col.Value
     let val : type.Value ← FromString.fromString s
     return some val
 
-example : (Column.mk .int false none).Value = Int := rfl
+example : (Column.mk .int false none false).Value = Int := rfl
+
+/-- What happens to a row referencing a row that is deleted, or whose referenced columns are
+updated. -/
+inductive ForeignKeyAction where
+  | noAction
+  | restrict
+  | cascade
+  | setNull
+  | setDefault
+  deriving Repr, BEq, DecidableEq, Hashable
+
+/--
+A foreign key of a table whose columns are indexed by `Index`: some of its columns reference
+columns of another table.
+
+The referenced table and its columns are named by strings, since a `Table` does not know the
+database it belongs to.
+-/
+structure ForeignKey (Index : Type) where
+  /-- The referencing columns of this table. -/
+  columns : List Index
+  /-- The name of the referenced table. -/
+  foreignTable : String
+  /-- The names of the referenced columns, in the order matching `columns`. -/
+  foreignColumns : List String
+  onDelete : ForeignKeyAction := .noAction
+  onUpdate : ForeignKeyAction := .noAction
+  deriving Repr, BEq, DecidableEq, Hashable
+
+/-- The SQL spelling of a referential action. -/
+def ForeignKeyAction.sql : ForeignKeyAction → String
+  | .noAction => "NO ACTION"
+  | .restrict => "RESTRICT"
+  | .cascade => "CASCADE"
+  | .setNull => "SET NULL"
+  | .setDefault => "SET DEFAULT"
+
+/-- Rename the columns of a foreign key along `f`. -/
+def ForeignKey.map {α β : Type} (f : α → β) (fk : ForeignKey α) : ForeignKey β where
+  columns := fk.columns.map f
+  foreignTable := fk.foreignTable
+  foreignColumns := fk.foreignColumns
+  onDelete := fk.onDelete
+  onUpdate := fk.onUpdate
 
 structure Table where
   Index : Type
   [indexing : Indexing Index]
   columns : Index → Column
+  /-- The columns of the primary key, in order. Empty for a table without one. -/
+  primaryKey : List Index := []
+  /-- The groups of columns that have to be unique together. -/
+  unique : List (List Index) := []
+  /-- The foreign keys of the table. -/
+  foreignKeys : List (ForeignKey Index) := []
 
 attribute [instance] Table.indexing
 
@@ -569,8 +622,15 @@ structure Database.Insert (d : Database) (tableName : d.Index) where
         (fun idx => (value idx).isSome || ((d.tables tableName).columns idx).isOptional) := by
     first | rfl | decide
 
-/-- The insert that supplies a value for every column of the table. -/
+/-- The insert that supplies a value for every column of the table the database does not generate
+itself. The value an entry holds for an auto-incrementing column is meaningless before the row
+exists, so it is left out and the database assigns one. -/
 def Database.Insert.ofEntry {d : Database} {tableName : d.Index}
     (e : (d.tables tableName).Entry) : d.Insert tableName where
-  value idx := some (e.value idx)
-  omitted_isOptional := by simp
+  value idx :=
+    if ((d.tables tableName).columns idx).autoIncrement then none else some (e.value idx)
+  omitted_isOptional := by
+    simp only [List.all_eq_true]
+    intro i _
+    by_cases h : ((d.tables tableName).columns i).autoIncrement <;>
+      simp [h, Column.isOptional]

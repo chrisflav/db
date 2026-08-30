@@ -110,6 +110,24 @@ def elabEnum (name : Name) (names : List (Name × String)) : CommandElabM Unit :
     | _ => throwError "Failed when constructing indexing instance."
   elabInstance indexing
 
+/--
+An integer primary key the database generates. A model field of this type becomes a single-column
+auto-incrementing primary key, which an insert leaves out for the database to assign.
+
+It is a `def` rather than a `structure` so that its values *are* the values of the column, which is
+what the generated `HasTable` encoding needs, while still being a distinct head symbol for instance
+resolution and for the field scan that finds the key.
+-/
+def AutoKey : Type := Int
+
+instance : Repr AutoKey := inferInstanceAs (Repr Int)
+instance : ToString AutoKey := inferInstanceAs (ToString Int)
+instance : Inhabited AutoKey := inferInstanceAs (Inhabited Int)
+instance : DecidableEq AutoKey := inferInstanceAs (DecidableEq Int)
+instance : BEq AutoKey := inferInstanceAs (BEq Int)
+instance (n : Nat) : OfNat AutoKey n := inferInstanceAs (OfNat Int n)
+instance : FromString AutoKey := inferInstanceAs (FromString Int)
+
 class HasDBType (α : Type) where
   type : DBType
   encoding : α ≃ type.Value
@@ -132,6 +150,10 @@ instance : HasDBType Int where
 
 instance : HasDBType String where
   type := .text
+  encoding := Equiv.refl _
+
+instance : HasColumn AutoKey where
+  column := { type := .int, nullable := false, autoIncrement := true }
   encoding := Equiv.refl _
 
 instance (α : Type) [HasDBType α] : HasColumn α where
@@ -204,9 +226,16 @@ def generateTable (decl : Name) : CommandElabM Unit := do
       Meta.mkAppOptM ``HasColumn.column #[some type, none]
   let colMap : Expr ←
     liftTermElabM <| fromEnum indexName cols (.const ``Column [])
+  -- The fields of type `AutoKey` make up the primary key, if there are any.
+  let keyFields := names.filter fun (_, type) => type.isConstOf ``AutoKey
   -- Construct `Table` and add to environment
-  let table : Expr ← liftTermElabM <|
-    Meta.mkAppM ``Table.mk #[.const indexName [], colMap]
+  let table : Expr ← liftTermElabM <| do
+    let idx : Expr := .const indexName []
+    let primaryKey ← List.asExpr idx (keyFields.map fun (n, _) => .const (indexName ++ n) [])
+    let unique ← Meta.mkAppOptM ``List.nil #[some (← Meta.mkAppM ``List #[idx])]
+    let foreignKeys ← Meta.mkAppOptM ``List.nil #[some (← Meta.mkAppM ``ForeignKey #[idx])]
+    Meta.mkAppOptM ``Table.mk
+      #[some idx, none, some colMap, some primaryKey, some unique, some foreignKeys]
   let tableDecl : Declaration :=
     .defnDecl
       { name := tableName
