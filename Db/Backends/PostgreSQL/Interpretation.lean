@@ -20,8 +20,12 @@ def Database.resolveName (d : Database) (tableName columnName : String) : Option
 namespace PostgreSQL
 
 inductive Exception where
-  | connectionError
-  | fatal
+  /-- The connection could not be established; the message is libpq's. -/
+  | connectionError (message : String)
+  /-- The server rejected a statement, or the connection failed while running it. The error
+  carries the server's message and SQLSTATE, so a unique violation (`23505`) or a serialisation
+  failure (`40001`) can be told apart from the rest. -/
+  | sqlError (error : SqlError)
   /-- A value the database returned could not be read as the type the view declares for it. -/
   | decodeError (message : String)
   /-- A migration that cannot be carried out. -/
@@ -40,11 +44,35 @@ abbrev M := ExceptT Exception (StateT State IO)
 nonrec def M.run (s : State) {α : Type} (x : M α) : IO (Except Exception α) := do
   return (← x.run.run s).1
 
+/-- Open a connection, run `x` on it and close the connection again. A server that keeps
+connections open across requests should own its connections instead: open them with
+`Connection.open` and run work with `M.run`. -/
 def runDB (connectionInfo : String) {α : Type} (x : M α) : IO (Except Exception α) := do
-  let conn ← connect connectionInfo
-  match conn with
-  | some conn => x.run { connectionInfo := connectionInfo, connection := conn }
-  | none => return .error .connectionError
+  let conn ← try Connection.open connectionInfo catch e => return .error (.connectionError (toString e))
+  try
+    x.run { connectionInfo := connectionInfo, connection := conn }
+  finally
+    conn.close
+
+/-- Run `sql` through `PQexec` and raise its failure as an `Exception.sqlError`. -/
+def execRaw (sql : String) : M Internal.Result := do
+  match ← (← get).connection.execE sql with
+  | .ok res => return res
+  | .error e => throw (.sqlError e)
+
+/-- Run `sql` with `params` bound to `$1`, `$2`, ... and return the rows; see
+`Connection.queryParams`. A failure is an `Exception.sqlError` carrying the SQLSTATE. -/
+def queryParams (sql : String) (params : Array (Option String)) : M QueryResult := do
+  match ← (← get).connection.execParamsE sql params with
+  | .ok res => return .ofRaw res
+  | .error e => throw (.sqlError e)
+
+/-- Run `sql` with `params` bound to `$1`, `$2`, ... and return the number of rows it affected;
+see `Connection.execParams`. A failure is an `Exception.sqlError` carrying the SQLSTATE. -/
+def execParams (sql : String) (params : Array (Option String)) : M Nat := do
+  match ← (← get).connection.execParamsE sql params with
+  | .ok res => return res.cmdTuples.toNat?.getD 0
+  | .error e => throw (.sqlError e)
 
 /-- Decode the rows of a result into the entries of `view`.
 
@@ -67,24 +95,13 @@ def decodeRows {d : Database} (view : View d) (rows : Array (Std.HashMap String 
 
 /-- Run a statement expected to return rows, and return them. -/
 def rowsOf (sql : String) : M (Array (Std.HashMap String (Option String))) := do
-  let conn := (← get).connection
-  match ← conn.exec sql with
-  | .data data => return data.optRows
-  | .success _ => return #[]
-  | .failure e =>
-    IO.println s!"{repr e}"
-    throw .fatal
+  return ResultData.optRows { raw := ← execRaw sql }
 
 /-- Run a statement that changes rows, and return how many it changed, as libpq's command tag
 reports it. -/
 def execCounting (sql : String) : M Nat := do
-  let conn := (← get).connection
-  match ← conn.exec sql with
-  | .data data => return data.nrows
-  | .success affected => return affected
-  | .failure e =>
-    IO.println s!"{repr e}"
-    throw .fatal
+  let res ← execRaw sql
+  return res.cmdTuples.toNat?.getD res.ntuples.toNat
 
 instance (d : Database) : DBMonad d M where
   lookup {view} q := do
@@ -114,10 +131,15 @@ instance (d : Database) : DBMonad d M where
     let sql : SQL.Delete := { SQL.Delete.fromDelete del with returning := SQL.columnNames table }
     decodeRows (Table.view table) (← rowsOf sql.toString)
 
-/-- Run a statement, ignoring its result. -/
+/-- Run a statement, ignoring its result and any failure. Used for the `ROLLBACK`s, which run
+while an error is already being reported. -/
 def execIgnoring (sql : String) : M Unit := do
   let conn := (← get).connection
-  _ ← conn.exec sql
+  _ ← conn.execE sql
+
+/-- Run a statement and discard its rows, raising its failure as an `Exception.sqlError`. -/
+def execChecked (sql : String) : M Unit := do
+  _ ← execRaw sql
 
 /-- The name a nested transaction saves the connection under. Duplicates are fine: `ROLLBACK TO`
 and `RELEASE` act on the most recent savepoint of the name, which is the innermost one. -/
@@ -128,11 +150,11 @@ instance : DBMonadTransactional M where
     -- Nested inside a transaction already in progress, this is a savepoint: a second `BEGIN` is a
     -- no-op PostgreSQL only warns about, so the inner `COMMIT` would commit the outer transaction.
     let nested := (← get).connection.transactionStatus != .idle
-    execIgnoring (if nested then s!"SAVEPOINT {savepointName}" else "BEGIN")
+    execChecked (if nested then s!"SAVEPOINT {savepointName}" else "BEGIN")
     try
       let a ← x
       if nested then
-        execIgnoring s!"RELEASE SAVEPOINT {savepointName}"
+        execChecked s!"RELEASE SAVEPOINT {savepointName}"
       else if (← get).connection.transactionStatus == .inError then
         -- A `COMMIT` of a transaction the server has aborted silently rolls back and reports
         -- success, so reporting one here would claim the work was kept when it was discarded.
@@ -141,7 +163,9 @@ instance : DBMonadTransactional M where
           "the transaction was aborted by a statement the database rejected, so it was rolled " ++
           "back rather than committed"
       else
-        execIgnoring "COMMIT"
+        -- A failed `COMMIT` (a deferred constraint, a serialisation failure) must be reported: the
+        -- server has rolled the transaction back by then.
+        execChecked "COMMIT"
       return a
     catch e =>
       -- Only an `Exception` of this monad is caught here; an `IO` error thrown underneath escapes
@@ -216,14 +240,8 @@ def InformationSchema.model : Model catalog InformationSchema where
 
 /-- Run a statement and return its rows, in which `none` is SQL's `NULL`. Used for the catalogue
 queries, which have no `DBType` counterpart for every column they return. -/
-def query (sql : String) : M (Array (Std.HashMap String (Option String))) := do
-  let conn := (← get).connection
-  match ← conn.exec sql with
-  | .data data => return data.optRows
-  | .success _ => return #[]
-  | .failure err =>
-    IO.println s!"Error {repr err}"
-    throw .fatal
+def query (sql : String) : M (Array (Std.HashMap String (Option String))) :=
+  rowsOf sql
 
 /-- Parse the single-letter referential action `pg_constraint` reports. -/
 def parseForeignKeyAction (s : String) : ForeignKeyAction :=
@@ -280,22 +298,10 @@ def catalogConstraints :
   return res
 
 instance : DBMonadWithMigrations M where
-  abort message := do
-    IO.println s!"PostgreSQL backend: {message}"
-    throw <| .migrationError message
+  abort message := throw <| .migrationError message
   execute operation := do
-    let conn := (← get).connection
     let sql : SQL.Migration.Operation := .fromDatabaseOperation operation
-    IO.println s!"Executing {sql.toString .postgres}"
-    let res ← conn.exec (sql.toString .postgres)
-    match res with
-    | .failure err =>
-      IO.println s!"Error {repr err}"
-      throw .fatal
-    | .data _ =>
-      IO.println s!"Returned data when no data was expected."
-      throw .fatal
-    | .success _ => pure ()
+    execChecked (sql.toString .postgres)
   currentDatabase := do
     let q : InformationSchema.model.Query :=
       .filter
