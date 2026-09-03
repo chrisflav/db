@@ -260,10 +260,91 @@ discards only its own work while an outer failure still discards everything. On 
 failure of the backend's own exception type rolls back; an `IO` error thrown underneath escapes
 with the transaction still open.
 
+`autoUpdate` migrates the tables the target schema declares and leaves every other table of the
+database alone, so a schema of your own, a PostGIS `spatial_ref_sys` or a table another
+application owns survives it. Pass `autoUpdate target (dropUnknownTables := true)` to have tables
+the target does not declare dropped (or renamed, when a target table has exactly their columns);
+`spatial_ref_sys` is never dropped.
+
 A caveat on identifiers: DDL emits them unquoted, so PostgreSQL folds a mixed-case column name to
 lower case while SQLite keeps it. Queries and returning statements are unaffected, as both alias
 their columns, but schema introspection on PostgreSQL then reports the folded name and `autoUpdate`
 does not converge. Keep column names lower case for now.
+
+## Raw parameterised SQL
+
+Whatever the DSL does not cover — PostGIS, full-text search, `ON CONFLICT`, a `WITH` query — can
+be sent to PostgreSQL as text with values bound as parameters, so that no value ever has to be
+escaped:
+
+```lean4
+open PostgreSQL in
+def toursNear (lon lat : Float) (radius : Nat) : PostgreSQL.M QueryResult :=
+  queryParams
+    "SELECT id, ST_AsGeoJSON(geom) FROM tour \
+     WHERE ST_DWithin(geom, ST_MakePoint($1, $2)::geography, $3)"
+    #[some (toString lon), some (toString lat), some (toString radius)]
+```
+
+`queryParams sql params` binds `params[i]` to `$(i+1)` and returns a `QueryResult` with the
+`columns`, the `rows` (each an `Array (Option String)`, `none` being `NULL`) and the number of
+rows the statement `affected`; `execParams` returns only the count. Everything is sent and received
+as text, so a value is written the way `psql` would print it, and the server infers the parameters'
+types from their use — add a cast such as `$1::int` where that is ambiguous. One statement per
+call: the extended protocol behind `PQexecParams` does not accept several `;`-separated ones.
+
+The same two are available outside the monad on a connection, `Connection.queryParams` and
+`Connection.execParams`, where a failure raises an `IO.Error` (`SqlError.ofIOError` reads the
+SQLSTATE back out of it). Inside `PostgreSQL.M`, a failure of any statement — raw or generated —
+is an `Exception.sqlError` carrying a `SqlError` with the server's `message` and its five-character
+`sqlstate`, so a unique violation or a serialisation failure can be handled rather than guessed at:
+
+```lean4
+match ← PostgreSQL.runDB url (insertReturning tag) with
+| .error (.sqlError e) =>
+  if e.isUniqueViolation then ...      -- SQLSTATE 23505
+  else if e.isSerializationFailure then ...  -- SQLSTATE 40001, retry the transaction
+  else IO.eprintln s!"{e}"             -- "SQLSTATE 42P01: ERROR:  relation ... does not exist"
+| .error (.connectionError msg) => ...
+| .ok tag => ...
+```
+
+## Connections
+
+`runDB conninfo x` opens a connection, runs `x` and closes it again. A server that keeps
+connections across requests owns them instead: `Connection.open conninfo` raises with libpq's
+message if it cannot connect, `Connection.status` tells whether the connection is still usable,
+`Connection.reset` reconnects after the server went away, `Connection.serverVersion` is the version
+as an integer (`170004` for 17.4), and `Connection.close` closes early — a second `close` does
+nothing, any other use of a closed connection raises. Work runs on such a connection with
+`M.run { connectionInfo, connection }`. A connection the program drops is closed by its finalizer,
+and every result is released as soon as it is unreachable.
+
+libpq allows a connection to be used from **one thread at a time**, and the library takes no locks.
+Give each thread, or each `Task`, its own connection — a pool of connections behind a mutex is the
+usual shape — and never share one between concurrent tasks. Every call blocks the OS thread it runs
+on for the duration of the statement.
+
+## Notifications
+
+`LISTEN`/`NOTIFY` is received on a connection of its own, since notifications are delivered to the
+connection that ran `LISTEN` and waiting for them occupies it:
+
+```lean4
+let listener ← PostgreSQL.Connection.open url
+_ ← listener.execParams "LISTEN tour_changed" #[]
+-- elsewhere: NOTIFY tour_changed, '42', or SELECT pg_notify('tour_changed', $1)
+repeat
+  match ← listener.waitNotify 30000 with
+  | some n => IO.println s!"{n.channel}: {n.payload} from backend {n.backendPid}"
+  | none => pure ()  -- 30 s without a notification; check whether to keep going
+```
+
+`waitNotify timeoutMs` sleeps in `poll()` on the connection's socket until a notification arrives or
+the time is up, in which case it returns `none`; run it from a dedicated task, since it blocks the
+thread. `notifies` returns every notification received so far without waiting — the server also
+sends them along with the result of any statement the listening connection runs. The server merges
+identical notifications sent within one transaction.
 
 ## Design
 
