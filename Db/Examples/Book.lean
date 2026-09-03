@@ -98,7 +98,9 @@ def test : IO Unit := do
       guard b.author = a.name
       guard a.retired
       select b
-  let res ← PostgreSQL.runDB "postgresql://testuser:secret@localhost/testdb2" x
+  -- The server under test, if `DB_TEST_URL` names one; the local development database otherwise.
+  let url := (← IO.getEnv "DB_TEST_URL").getD "postgresql://testuser:secret@localhost/testdb2"
+  let res ← PostgreSQL.runDB url x
   match res with
   | .error e => IO.println s!"Error occured: {repr e}."
   | .ok books =>
