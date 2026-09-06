@@ -5,3 +5,4 @@ def main : IO Unit := do
   SqliteExample.test
   -- Demo using the PostgreSQL backend (requires a running PostgreSQL server).
   BookExample.test
+  BookExample.correlateTest

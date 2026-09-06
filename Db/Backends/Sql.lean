@@ -40,6 +40,8 @@ inductive Expr where
   | inList (e : Expr) (values : List Expr)
   /-- `e IN (SELECT ...)`. -/
   | inSelect (e : Expr) (sel : Select)
+  /-- A subquery used as a value, which is what a `SELECT` list needs it to be. -/
+  | scalar (sel : Select)
   /-- An aggregate function call. `arg = none` renders as `*`, as in `COUNT(*)`. -/
   | aggregate (fn : String) (distinct : Bool) (arg : Option Expr)
   -- Named variable (e.g. as produced by an alias)
@@ -118,6 +120,7 @@ partial def Expr.toString : Expr → String
   | .inList e values =>
     s!"({e.toString}) IN ({", ".intercalate (values.map Expr.toString)})"
   | .inSelect e sel => s!"({e.toString}) IN ({sel.toString})"
+  | .scalar sel => s!"({sel.toString})"
   | .aggregate fn distinct arg =>
     letI inner := match arg with
       | some e => e.toString
@@ -307,6 +310,34 @@ partial def Select.fromQuery {d : Database} {view : View d} (q : Query d view)
     -- limits its rows would be applied in the wrong order.
     letI s := if inner.limit.isSome || inner.offset.isSome then inner.wrap else inner
     { s with offset := some n }
+  | .correlate (outer := outer) (inner := inner) name q sub on agg _ =>
+    -- The two sides are aliased through `outer.prod inner`, which is the view `on` is written
+    -- over: the outer rows come back as `left__*` and the subquery's as `right__*`, so the
+    -- condition's references resolve to the right one of the two scopes the scalar subquery sits
+    -- between. The outer columns keep those aliases in the `FROM`, and are renamed to the ones
+    -- this query's own view asks for on the way out.
+    letI outerSelect : Select := Select.fromQuery q (outer.prod inner) (View.sumInl _ _)
+    letI innerSelect : Select := Select.fromQuery sub (outer.prod inner) (View.sumInr _ _)
+    letI aggExpr : Expr :=
+      match agg with
+      | .group col => .var ((outer.prod inner).alias (Sum.inr col))
+      | .countAll => .aggregate "COUNT" Bool.false none
+      | .apply f col _ =>
+        .aggregate f.toString f.distinct
+          (some (.var ((outer.prod inner).alias (Sum.inr col))))
+    letI scalarSelect : Select :=
+      { selector := .fields [(name, aggExpr)]
+        from_ := .select innerSelect none
+        condition := Expr.fromExpr on
+        isAggregate := true }
+    { selector :=
+        .fields <|
+          ((Enum.all outer.Index).toList.map fun idx =>
+            (s!"{emb.map (Sum.inl idx)}",
+              Expr.var ((outer.prod inner).alias (Sum.inl idx)))) ++
+          [(s!"{emb.map (Sum.inr ⟨⟩)}", .scalar scalarSelect)]
+      from_ := .select outerSelect none
+      condition := .true }
   | .aggregate (out := out) a q =>
     letI inner : Select := Select.fromQuery q
     { selector :=

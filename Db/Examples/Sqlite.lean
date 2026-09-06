@@ -687,6 +687,43 @@ def migrationDemo : Sqlite.M Unit := do
   let pending := (← currentDatabase).operations widgetV2
   IO.println s!"Pending operations after migration: {pending.size}"
 
+/-- Exercise the correlated scalar subquery: every author, with the number of books they wrote,
+counted by a subquery rather than by a join that would drop the authors who wrote none. -/
+def correlateDemo : Sqlite.M Unit := do
+  autoUpdate (%database mydb)
+  insert mike
+  insert lisa
+  insert nora
+  insert novel
+  insert drama
+  insert sequel
+  let counted : Query (%database mydb) _ :=
+    .correlate "books"
+      (.all (HasModel.model Author).index)
+      (.all (HasModel.model Book).index)
+      (.eq (.var (Sum.inr BookIndex.author) (.varchar 100))
+           (.var (Sum.inl AuthorIndex.name) (.varchar 100)))
+      .countAll
+  IO.println s!"SQL: {(SQL.Select.fromQuery counted).toString}"
+  let rows ← DBMonad.lookup counted
+  IO.println "Authors and how many books they wrote:"
+  for row in rows do
+    IO.println <|
+      s!"  {row.value (Sum.inl AuthorIndex.name)}: {row.value (Sum.inr ⟨⟩)}"
+  -- An aggregate other than a count. `MAX` over no rows is `NULL`, so the column is nullable and
+  -- the author who wrote nothing reads back as `none` rather than as a zero.
+  let latest : Query (%database mydb) _ :=
+    .correlate "latest"
+      (.all (HasModel.model Author).index)
+      (.all (HasModel.model Book).index)
+      (.eq (.var (Sum.inr BookIndex.author) (.varchar 100))
+           (.var (Sum.inl AuthorIndex.name) (.varchar 100)))
+      (.apply .max BookIndex.year)
+  IO.println "Authors and the year of their latest book:"
+  for row in ← DBMonad.lookup latest do
+    IO.println <|
+      s!"  {row.value (Sum.inl AuthorIndex.name)}: {row.value (Sum.inr ⟨⟩)}"
+
 /-- Run both demos against a fresh in-memory SQLite database. -/
 def test : IO Unit := do
   Sqlite.runDB ":memory:" bookDemo
@@ -698,5 +735,6 @@ def test : IO Unit := do
   Sqlite.runDB ":memory:" quirkDemo
   Sqlite.runDB ":memory:" writeDemo
   Sqlite.runDB ":memory:" migrationDemo
+  Sqlite.runDB ":memory:" correlateDemo
 
 end SqliteExample

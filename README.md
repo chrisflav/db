@@ -148,6 +148,31 @@ def booksPerAuthor : Query mydb booksPerAuthorView :=
 
 `AVG` is missing because `DBType` has no floating-point type to give its result.
 
+`Query.correlate` computes one such aggregate per row of an outer query, over the rows of a
+subquery correlated with that row — the `(SELECT COUNT(*) FROM child WHERE child.parent =
+parent.id)` of a `SELECT` list:
+
+```lean
+let counted : Query mydb _ :=
+  .correlate "books"
+    (.all (HasModel.model Author).index)   -- the outer rows
+    (.all (HasModel.model Book).index)     -- the rows to aggregate
+    (.eq (.var (Sum.inr BookIndex.author) (.varchar 100))
+         (.var (Sum.inl AuthorIndex.name) (.varchar 100)))
+    .countAll
+```
+
+None of the other constructors express this. A join multiplies the outer rows by the inner ones
+rather than reducing them, and an aggregate over a join loses the outer rows that match nothing —
+where this keeps the author who wrote no books, with a count of `0`.
+
+The result view is the outer one extended by a single column under the given name, whose type and
+nullability are the aggregate's: `countAll` gives a non-null `int`, while `MIN`/`MAX`/`SUM` are
+nullable, being `NULL` for a row the subquery matches nothing for. The condition is written over
+`outer.prod inner`, so `Sum.inl` names an outer column and `Sum.inr` an inner one. A `group` entry
+is rejected, a subquery returning one row per group not being a value a `SELECT` list has room
+for.
+
 ## Column types and defaults
 
 `DBType` covers `bool`, `int`, `varchar n` and unbounded `text`. A model field of type `String`
