@@ -104,6 +104,28 @@ literal it is compared with; testing for `NULL` is `isNone`, not `= none`.
 Membership in a subquery, `col IN (SELECT ...)`, is `DBExpr.inSubquery` on the core API; the
 `query%` DSL has no surface syntax for it yet.
 
+## Joins
+
+`Query.join` is a cross join, and an inner join is that filtered by a condition, which is what the
+`query%` DSL writes for a `guard` relating two bound rows.
+
+An outer join is not that, and cannot be built out of it: a `WHERE` runs after the join has already
+decided which rows found no partner, so no condition over a cross product keeps a row that matched
+nothing. `Query.leftJoin` carries its own condition and is a constructor of its own:
+
+```lean
+-- Every book, with its author where there is one.
+let joined : Query mydb _ :=
+  .leftJoin (.all (HasModel.model Book).index) (.all (HasModel.model Author).index)
+    (.eq (.var (Sum.inl BookIndex.author) (.varchar 100))
+         (.var (Sum.inr AuthorIndex.name) (.varchar 100)))
+```
+
+The result view is `s.prod t.nullable`: the join makes every column of the right-hand side
+nullable, so `row.value (Sum.inr AuthorIndex.age)` is an `Option Int` even though `age` is declared
+`NOT NULL`, and is `none` for a book whose author has no row. Like `inSubquery`, this is core API
+that the `query%` DSL has no surface syntax for yet.
+
 ## Ordering, paging and aggregates
 
 A `query% do` block can sort and page its result:

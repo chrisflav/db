@@ -357,6 +357,18 @@ def Database.Name.toString {d : Database} : d.Name → String
   | .ident i => i.toString
   | .computation s _ => s
 
+/-- The same view with every column nullable.
+
+This is what an outer join does to the side that may not match: a row of the left-hand query that
+finds no partner still comes back, with `NULL` in every column of the right. The columns become
+`computation` names rather than staying `ident`s, a nullable column of a table being a different
+column from the one the table declares — the name and the type they carry are unchanged, so an
+expression over the view and the aliases the SQL uses are the same either way. -/
+def View.nullable {d : Database} (view : View d) : View d where
+  Index := view.Index
+  indexing := view.indexing
+  name i := .computation (view.name i).toString { (view.name i).column with nullable := true }
+
 @[ext]
 structure View.Entry {d : Database} (view : View d) : Type where
   value (idx : view.Index) : (view.name idx).column.Value
@@ -554,6 +566,18 @@ inductive Query (d : Database) : View d → Type 1 where
   with the appropriate filter condition.
   -/
   | join {s t : View d} (q₁ : Query d s) (q₂ : Query d t) : Query d (s.prod t)
+  /--
+  Left outer join: every row of `q₁`, paired with the rows of `q₂` the condition matches, and with
+  `NULL` throughout the right-hand columns where it matches none.
+
+  Unlike `join` this carries its condition, rather than being filtered afterwards: a `WHERE` runs
+  after the join has already decided which rows found no partner, so filtering a cross product
+  cannot express an outer join however the condition is written.
+
+  The result view has the right-hand side nullable, which is what the join does to it.
+  -/
+  | leftJoin {s t : View d} (q₁ : Query d s) (q₂ : Query d t)
+      (on : DBExpr d (s.prod t.nullable) .bool) : Query d (s.prod t.nullable)
   -- Example: `Query d (s.prod t) -> Query d s`
   | project {s t : View d} (p : t.Hom s) (q₁ : Query d s) : Query d t
   /-- Sort the rows of a query. Sorting is view-preserving: the output columns are unchanged. -/
