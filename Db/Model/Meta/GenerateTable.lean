@@ -239,8 +239,11 @@ def generateTable (decl : Name) : CommandElabM Unit := do
     let primaryKey ← List.asExpr idx (keyFields.map fun (n, _) => .const (indexName ++ n) [])
     let unique ← Meta.mkAppOptM ``List.nil #[some (← Meta.mkAppM ``List #[idx])]
     let foreignKeys ← Meta.mkAppOptM ``List.nil #[some (← Meta.mkAppM ``ForeignKey #[idx])]
+    -- A model declares no indexes: they are attached to the table afterwards, since which of a
+    -- structure's fields are worth indexing is not something the structure says.
+    let indexes ← Meta.mkAppOptM ``List.nil #[some (← Meta.mkAppM ``TableIndex #[idx])]
     Meta.mkAppOptM ``Table.mk
-      #[some idx, none, some colMap, some primaryKey, some unique, some foreignKeys]
+      #[some idx, none, some colMap, some primaryKey, some unique, some foreignKeys, some indexes]
   let tableDecl : Declaration :=
     .defnDecl
       { name := tableName

@@ -337,6 +337,25 @@ def tableUnique (tableName : String) : M (List (List String)) := do
     res := (columnRows.toList.filterMap (·.text? "nm")) :: res
   return res.reverse
 
+/-- The indexes of `tableName` that were created by a `CREATE INDEX`.
+
+`sqlite_master.sql` is `NULL` for the indexes SQLite creates itself to back a `UNIQUE` or primary
+key constraint, so that is exactly the filter that leaves the ones somebody declared. The stored
+text is the statement as it was written, which is what `parseCreateIndex?` reads back.
+
+An index whose text does not parse is dropped from the result rather than reported. The
+consequence is the safe one: `autoUpdate` manages only the index names the target declares, so an
+unparseable index is either not one of them and left alone, or is one of them and gets re-created
+in the declared shape. -/
+def tableIndexes (tableName : String) : M (List (TableIndex String)) := do
+  let rows ← query <|
+    s!"SELECT name AS nm, sql AS ddl FROM sqlite_master WHERE type = 'index' " ++
+    s!"AND tbl_name = '{tableName.replace "'" "''"}' AND sql IS NOT NULL ORDER BY name"
+  return rows.toList.filterMap fun row => do
+    let name ← row.text? "nm"
+    let ddl ← row.text? "ddl"
+    SQL.Migration.parseCreateIndex? name ddl
+
 /-- The foreign keys of `tableName`. `pragma_foreign_key_list` reports one row per referencing
 column, which the `id` column groups into keys and `seq` orders within a key. -/
 def tableForeignKeys (tableName : String) : M (List (ForeignKey String)) := do
@@ -463,8 +482,12 @@ instance : DBMonadWithMigrations M where
         { columns := columns
           primaryKey := primaryKey
           unique := ← tableUnique name
-          foreignKeys := ← tableForeignKeys name }
+          foreignKeys := ← tableForeignKeys name
+          indexes := ← tableIndexes name }
     return { tables := tables }
+  executeIndex op := do
+    let db ← read
+    db.exec (SQL.Migration.indexOperationToString op)
   execute op := do
     let db ← read
     match SQL.Migration.Operation.fromDatabaseOperation op with
