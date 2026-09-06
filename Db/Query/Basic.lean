@@ -606,6 +606,21 @@ def View.singletonValue {d : Database} {name : String} {c : Column}
 def signature {d : Database} (s : Std.HashSet d.Name) : Std.HashMap d.Name DBType :=
   s.inner.map (fun n _ ↦ n.dbtype)
 
+/-- What an insert does with a row it cannot store because storing it would violate a uniqueness
+constraint — a primary key, a `UNIQUE` group, or a unique index.
+
+`update` is an upsert, and sets the named columns to the values the insert was carrying, which is
+what `excluded` refers to in SQL. Both backends require a conflict target for it: they will not
+guess which constraint an update is meant to resolve. -/
+inductive Database.ConflictAction (d : Database) (tableName : d.Index) where
+  /-- Fail, which is what an insert does unasked. -/
+  | error
+  /-- Skip the row and carry on, leaving the row already there as it is. -/
+  | ignore
+  /-- Overwrite `set` on the row already there with the values this insert carried, when the row
+  conflicts on `target`. -/
+  | update (target : List (d.tables tableName).Index) (set : List (d.tables tableName).Index)
+
 /--
 The data of a row to insert into `tableName`: a value for each column, except for those the
 database can supply a value for itself.
@@ -613,6 +628,8 @@ database can supply a value for itself.
 structure Database.Insert (d : Database) (tableName : d.Index) where
   /-- The value to insert into each column, `none` to leave it to the database. -/
   value (idx : (d.tables tableName).Index) : Option ((d.tables tableName).columns idx).Value
+  /-- What to do with a row that conflicts with one already stored. -/
+  onConflict : Database.ConflictAction d tableName := .error
   /-- A column may only be left out if the database has a value for it, i.e. if it has a default
   or is nullable. -/
   omitted_isOptional :

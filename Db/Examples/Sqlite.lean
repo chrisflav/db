@@ -687,6 +687,35 @@ def migrationDemo : Sqlite.M Unit := do
   let pending := (← currentDatabase).operations widgetV2
   IO.println s!"Pending operations after migration: {pending.size}"
 
+/-- Exercise conflict handling on insert: a second row conflicting with the first is skipped when
+the insert says to ignore it, and overwrites the stored one when the insert says to update. -/
+def conflictDemo : Sqlite.M Unit := do
+  autoUpdate noteDb.recipe
+  let note (id : Int) (body : String) (state : VarChar 20) :
+      (noteDb).Insert NoteDbIndex.note :=
+    { value
+        | .id => some id
+        | .body => some body
+        | .state => some state
+        | .archived => none
+        | .created => none
+        | .tag => none }
+  DBMonad.insert (d := noteDb) (note 1 "first" (v"open"))
+  -- `id` is the primary key, so this conflicts. Without a conflict action it would fail.
+  let ignored ← DBMonad.insertReturning (d := noteDb)
+    { note 1 "second" (v"open") with onConflict := .ignore }
+  IO.println s!"Rows stored by the ignored insert: {ignored.size}"
+  let rows ← query "SELECT body FROM note WHERE id = 1"
+  IO.println s!"The row is untouched: {rows[0]!.textD "body" "?"}"
+  -- The same conflict, resolved by overwriting `body` with the value the insert carried.
+  let updated ← DBMonad.insertReturning (d := noteDb)
+    { note 1 "third" (v"open") with onConflict := .update [.id] [.body] }
+  IO.println s!"Rows stored by the upserting insert: {updated.size}"
+  let rows ← query "SELECT body, state FROM note WHERE id = 1"
+  IO.println <|
+    s!"The row was overwritten: body={rows[0]!.textD "body" "?"}, " ++
+    s!"state={rows[0]!.textD "state" "?"} (untouched, not in the set list)"
+
 /-- Run both demos against a fresh in-memory SQLite database. -/
 def test : IO Unit := do
   Sqlite.runDB ":memory:" bookDemo
@@ -698,5 +727,6 @@ def test : IO Unit := do
   Sqlite.runDB ":memory:" quirkDemo
   Sqlite.runDB ":memory:" writeDemo
   Sqlite.runDB ":memory:" migrationDemo
+  Sqlite.runDB ":memory:" conflictDemo
 
 end SqliteExample
