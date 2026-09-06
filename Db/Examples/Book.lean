@@ -82,6 +82,30 @@ example : QuerySet Author := query% do
 
 end DSLChecks
 
+/-- The correlated scalar subquery against a real server. -/
+def correlateTest : IO Unit := do
+  let x : PostgreSQL.M Unit := do
+    autoUpdate (%database mydb)
+    let _ ← HasModel.delete (α := Book) .true
+    let _ ← HasModel.delete (α := Author) .true
+    insert mike
+    insert lisa
+    insert novel
+    insert drama
+    let counted : Query (%database mydb) _ :=
+      .correlate "books"
+        (.all (HasModel.model Author).index)
+        (.all (HasModel.model Book).index)
+        (.eq (.var (Sum.inr BookIndex.author) (.varchar 100))
+             (.var (Sum.inl AuthorIndex.name) (.varchar 100)))
+        .countAll
+    IO.println "Authors and how many books they wrote (PostgreSQL):"
+    for row in ← DBMonad.lookup counted do
+      IO.println s!"  {row.value (Sum.inl AuthorIndex.name)}: {row.value (Sum.inr ⟨⟩)}"
+  match ← PostgreSQL.runDB "postgresql://testuser:secret@localhost/testdb2" x with
+  | .error e => IO.println s!"Error occured: {repr e}."
+  | .ok _ => pure ()
+
 def test : IO Unit := do
   let x : PostgreSQL.M (Array Book) := do
     -- Update database schema to target schema

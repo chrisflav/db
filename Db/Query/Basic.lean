@@ -357,6 +357,20 @@ def Database.Name.toString {d : Database} : d.Name → String
   | .ident i => i.toString
   | .computation s _ => s
 
+/-- The name a view gives one of its columns, which is the alias the generated SQL uses for it.
+
+A function rather than `toString` written at the use site: `(v₁.prod v₂).Index` unfolds to a `Sum`,
+and instance resolution then finds the derived `ToString` for sums rather than the one the view's
+own `Indexing` provides, which is the one that says `left__`/`right__`. Taking the view as a
+parameter keeps its index type abstract, so the right instance is the only one there is. -/
+def View.alias {d : Database} (view : View d) (i : view.Index) : String :=
+  ToString.toString i
+
+/-- The one-column view holding a computed value under the name `name`. -/
+def View.singleton (d : Database) (name : String) (c : Column) : View d where
+  Index := IUnit name
+  name _ := .computation name c
+
 @[ext]
 structure View.Entry {d : Database} (view : View d) : Type where
   value (idx : view.Index) : (view.name idx).column.Value
@@ -564,6 +578,23 @@ inductive Query (d : Database) : View d → Type 1 where
   | offset {view : View d} (n : Nat) (q : Query d view) : Query d view
   /-- Group the rows of `q` and aggregate each group into a row of `out`. -/
   | aggregate {source out : View d} (a : Aggregation source out) (q : Query d source) : Query d out
+  /--
+  Extend every row of `q` with one value computed by a subquery over `sub`, correlated with that
+  row: `on` is a condition over the outer row and the inner one together, and `agg` says what to
+  compute over the inner rows it selects.
+
+  This is the `(SELECT COUNT(*) FROM child WHERE child.parent = parent.id)` of a `SELECT` list,
+  which no combination of the other constructors expresses: a join would multiply the outer rows by
+  the inner ones rather than reducing them, and an aggregate over a join would lose the outer rows
+  that match nothing.
+
+  `agg` may not be a `group`, which would make the subquery return one row per group rather than
+  the single value a `SELECT` list has room for.
+  -/
+  | correlate {outer inner : View d} (name : String) (q : Query d outer) (sub : Query d inner)
+      (on : DBExpr d (outer.prod inner) .bool) (agg : AggregateEntry inner)
+      (h : agg.groupColumn.isNone = true := by rfl) :
+      Query d (outer.prod (View.singleton d name agg.column))
 
 end
 
@@ -586,11 +617,6 @@ example {d : Database} {n : Nat} {view : View d} (e : DBExpr d view (.varchar n)
 example {d : Database} {n : Nat} {view : View d} (e : DBExpr d view (.varchar n)) :
     DBExpr d view .bool :=
   .contains e "abc"
-
-/-- The one-column view holding a computed value under the name `name`. -/
-def View.singleton (d : Database) (name : String) (c : Column) : View d where
-  Index := IUnit name
-  name _ := .computation name c
 
 /-- `SELECT COUNT(*)`: the number of rows of `q`, as a query with a single `int` column named
 `name`. -/
