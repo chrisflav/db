@@ -279,6 +279,31 @@ def catalogConstraints :
       res := res.insert tbl (primaryKey, unique, foreignKeys ++ [fk])
   return res
 
+/-- The indexes of every table in `public` that a `CREATE INDEX` created.
+
+`indisprimary` and the indexes backing a `UNIQUE` constraint are excluded: those are the
+constraints' own, reported by `catalogConstraints`, and dropping one would drop the constraint with
+it. `pg_get_indexdef` gives the definition back in PostgreSQL's canonical spelling, which
+`parseCreateIndex?` normalises — a `lower(title)` on a `varchar` column comes back as
+`lower((title)::text)`. -/
+def catalogIndexes : M (Std.HashMap String (List (TableIndex String))) := do
+  let rows ← query <|
+    "SELECT rel.relname AS tbl, cls.relname AS idx, pg_get_indexdef(i.indexrelid) AS ddl " ++
+    "FROM pg_index i " ++
+    "JOIN pg_class cls ON cls.oid = i.indexrelid " ++
+    "JOIN pg_class rel ON rel.oid = i.indrelid " ++
+    "JOIN pg_namespace n ON n.oid = rel.relnamespace " ++
+    "WHERE n.nspname = 'public' AND NOT i.indisprimary " ++
+    "AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = i.indexrelid) " ++
+    "ORDER BY rel.relname, cls.relname"
+  let mut res : Std.HashMap String (List (TableIndex String)) := ∅
+  for row in rows do
+    let (some tbl, some idx, some ddl) :=
+      (row.get? "tbl" >>= id, row.get? "idx" >>= id, row.get? "ddl" >>= id) | continue
+    let some parsed := SQL.Migration.parseCreateIndex? idx ddl | continue
+    res := res.insert tbl (res.getD tbl [] ++ [parsed])
+  return res
+
 instance : DBMonadWithMigrations M where
   abort message := do
     IO.println s!"PostgreSQL backend: {message}"
@@ -296,6 +321,17 @@ instance : DBMonadWithMigrations M where
       IO.println s!"Returned data when no data was expected."
       throw .fatal
     | .success _ => pure ()
+  executeIndex op := do
+    let conn := (← get).connection
+    let sql := SQL.Migration.indexOperationToString op
+    match ← conn.exec sql with
+    | .failure err =>
+      IO.println s!"Error {repr err}"
+      throw .fatal
+    | .data _ =>
+      IO.println s!"Returned data when no data was expected."
+      throw .fatal
+    | .success _ => pure ()
   currentDatabase := do
     let q : InformationSchema.model.Query :=
       .filter
@@ -304,6 +340,7 @@ instance : DBMonadWithMigrations M where
         (.all _)
     let infos ← q.fetch
     let constraints ← catalogConstraints
+    let indexes ← catalogIndexes
     let mut tables : Std.HashMap String TableRecipe := .emptyWithCapacity
     for info in infos do
       if let some col := info.column then
@@ -315,7 +352,8 @@ instance : DBMonadWithMigrations M where
         { columns := columns
           primaryKey := primaryKey
           unique := unique
-          foreignKeys := foreignKeys }
+          foreignKeys := foreignKeys
+          indexes := indexes.getD name [] }
     return { tables := tables }
 
 end PostgreSQL

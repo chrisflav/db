@@ -229,6 +229,31 @@ def shapeDemo : Sqlite.M Unit := do
     select b
     order_by_desc b.title
   IO.println s!"Books by title, descending: {reversed.map (·.title.val)}"
+  -- Case-insensitive ordering. `aBSOLUTE` sorts between `A drama` and `Best novel ever!` under
+  -- `nocase`, and after every capitalised title without it.
+  insert { title := v"aBSOLUTE beginners", author := lisa.name, year := none : Book }
+  let caseSensitive ← fetch <| query% do
+    let b ← from Book
+    select b
+    order_by b.title
+  IO.println s!"By title, case-sensitively: {caseSensitive.map (·.title.val)}"
+  let caseInsensitive ← fetch <| query% do
+    let b ← from Book
+    select b
+    order_by b.title nocase
+  IO.println s!"By title, ignoring case: {caseInsensitive.map (·.title.val)}"
+  -- Null placement. `year` is `NULL` for two of these, and SQLite would sort them first ascending.
+  let nullsLast ← fetch <| query% do
+    let b ← from Book
+    select b
+    order_by b.year nulls_last
+  IO.println s!"By year, nulls last: {nullsLast.map (fun b => (b.year, b.title.val))}"
+  let nullsFirstDesc ← fetch <| query% do
+    let b ← from Book
+    select b
+    order_by_desc b.year nulls_first
+  IO.println <|
+    s!"By year descending, nulls first: {nullsFirstDesc.map (fun b => (b.year, b.title.val))}"
   -- `LIMIT`, and `LIMIT` with `OFFSET`, applied to the sorted result.
   let firstTwo ← fetch <| query% do
     let b ← from Book
@@ -377,6 +402,65 @@ def noteDb : Database where
   tables
     | .note => noteTable
     | .noteTag => noteTagTable
+
+/-- The note schema with indexes declared on it: one plain, one descending, one case-insensitive,
+and one unique. -/
+def noteDbIndexed : DatabaseRecipe where
+  tables := noteDb.recipe.tables.map fun name table =>
+    if name == "note" then
+      { table with
+          indexes :=
+            [ { name := "idx_note_state", keys := [{ column := "state" }] },
+              { name := "idx_note_created_desc",
+                keys := [{ column := "created", direction := .desc }] },
+              { name := "idx_note_body_nocase",
+                keys := [{ column := "body", collation := .caseInsensitive },
+                         { column := "id" }] },
+              { name := "idx_note_tag_unique", keys := [{ column := "tag" }], unique := true } ] }
+    else table
+
+/-- The same, with `idx_note_state` re-declared over a different column, to migrate towards. -/
+def noteDbIndexedAltered : DatabaseRecipe where
+  tables := noteDbIndexed.tables.map fun name table =>
+    if name == "note" then
+      { table with
+          indexes := table.indexes.map fun idx =>
+            if idx.name == "idx_note_state" then
+              { idx with keys := [{ column := "archived" }] }
+            else idx }
+    else table
+
+/-- Exercise index support: create the schema with indexes, confirm they reach the database and
+round-trip through introspection, then change one and confirm it is re-created. -/
+def indexDemo : Sqlite.M Unit := do
+  autoUpdate noteDbIndexed
+  let listed ← query <|
+    "SELECT name AS nm, sql AS ddl FROM sqlite_master WHERE type = 'index' " ++
+    "AND sql IS NOT NULL ORDER BY name"
+  IO.println "Indexes in the database:"
+  for row in listed do
+    IO.println s!"  {row.textD "ddl" "?"}"
+  -- Reaching a fixed point is the whole point: introspection has to read back exactly what was
+  -- declared, or every run would drop and re-create the same indexes.
+  let pending := (← currentDatabase).indexOperations noteDbIndexed
+  IO.println s!"Pending index operations after creating them: {pending.size}"
+  -- An index whose keys changed is dropped and re-created under the same name.
+  autoUpdate noteDbIndexedAltered
+  let after ← query <|
+    "SELECT sql AS ddl FROM sqlite_master WHERE type = 'index' AND name = 'idx_note_state'"
+  IO.println s!"After re-declaring it: {(after[0]?.map (·.textD "ddl" "?")).getD "(gone)"}"
+  IO.println <|
+    s!"Pending index operations after the change: " ++
+    s!"{((← currentDatabase).indexOperations noteDbIndexedAltered).size}"
+  -- An index the target does not declare is left alone rather than dropped.
+  (← read).exec "CREATE INDEX idx_note_handmade ON note (state, id)"
+  let stillThere := ((← currentDatabase).indexOperations noteDbIndexedAltered).size
+  autoUpdate noteDbIndexedAltered
+  let handmade ← query <|
+    "SELECT count(*) AS n FROM sqlite_master WHERE type = 'index' AND name = 'idx_note_handmade'"
+  IO.println <|
+    s!"A hand-made index survives autoUpdate: {handmade[0]!.textD "n" "?"} " ++
+    s!"(and provoked {stillThere} operations)"
 
 /-- The same schema with a different `UNIQUE` constraint, to migrate towards. -/
 def noteDbAltered : DatabaseRecipe where
@@ -698,5 +782,6 @@ def test : IO Unit := do
   Sqlite.runDB ":memory:" quirkDemo
   Sqlite.runDB ":memory:" writeDemo
   Sqlite.runDB ":memory:" migrationDemo
+  Sqlite.runDB ":memory:" indexDemo
 
 end SqliteExample

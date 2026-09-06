@@ -82,6 +82,36 @@ example : QuerySet Author := query% do
 
 end DSLChecks
 
+/-- The `mydb` schema with indexes on `book`, named through the model's own index type: one plain,
+one descending, one case-insensitive over two keys, and one unique. -/
+def indexedRecipe : DatabaseRecipe :=
+  (%database mydb).recipe.withIndexes "book" <| tableIndexes BookIndex
+    [ { name := "idx_book_author", keys := [{ column := .author }] },
+      { name := "idx_book_year_desc", keys := [{ column := .year, direction := .desc }] },
+      { name := "idx_book_title_nocase",
+        keys := [{ column := .title, collation := .caseInsensitive }, { column := .author }] },
+      { name := "idx_book_title_unique", keys := [{ column := .title }], unique := true } ]
+
+/-- Indexes against a real server. Worth its own demo because PostgreSQL hands an index definition
+back in its own spelling rather than the one it was given — a `lower(title)` on a `varchar` column
+comes back as `lower((title)::text)` — and `autoUpdate` only converges if that is read back as what
+was declared. -/
+def indexTest : IO Unit := do
+  let x : PostgreSQL.M Unit := do
+    -- The demo above leaves its rows behind, and re-running it leaves them twice, so the unique
+    -- index below would have nothing to be unique over. Start from an empty table.
+    autoUpdate (%database mydb)
+    let _ ← HasModel.delete (α := Book) .true
+    autoUpdate indexedRecipe
+    let pending := (← currentDatabase).indexOperations indexedRecipe
+    IO.println s!"Pending index operations after creating them (PostgreSQL): {pending.size}"
+    let current ← currentDatabase
+    for idx in (current.tables["book"]?.map (·.indexes)).getD [] do
+      IO.println s!"  read back: {repr idx}"
+  match ← PostgreSQL.runDB "postgresql://testuser:secret@localhost/testdb2" x with
+  | .error e => IO.println s!"Error occured: {repr e}."
+  | .ok _ => pure ()
+
 def test : IO Unit := do
   let x : PostgreSQL.M (Array Book) := do
     -- Update database schema to target schema

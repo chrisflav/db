@@ -58,6 +58,9 @@ structure TableRecipe : Type where
   unique : List (List String) := []
   /-- The foreign keys of the table. -/
   foreignKeys : List (ForeignKey String) := []
+  /-- The indexes of the table. Not part of `normalizedConstraints`: an index change is migrated
+  rather than reported, since `CREATE INDEX`/`DROP INDEX` says the whole of it. -/
+  indexes : List (TableIndex String) := []
   deriving Repr
 
 /--
@@ -113,6 +116,11 @@ def TableRecipe.table (recipe : TableRecipe) : Table where
              foreignColumns := fk.foreignColumns
              onDelete := fk.onDelete
              onUpdate := fk.onUpdate }
+  indexes := recipe.indexes.filterMap fun idx => do
+    let keys ← idx.keys.mapM fun k => do
+      let column ← FromString.fromString k.column
+      return { column := column, direction := k.direction, collation := k.collation }
+    return { name := idx.name, keys := keys, unique := idx.unique }
 
 /-- A reconstructed database from a database recipe. -/
 def DatabaseRecipe.table (recipe : DatabaseRecipe) : Database where
@@ -126,6 +134,7 @@ def Table.recipe (table : Table) : TableRecipe where
   primaryKey := table.primaryKey.map toString
   unique := table.unique.map fun group => group.map toString
   foreignKeys := table.foreignKeys.map (ForeignKey.map toString)
+  indexes := table.indexes.map (TableIndex.map toString)
 
 def Database.recipe (database : Database) : DatabaseRecipe where
   tables := .ofArray <|
@@ -247,6 +256,56 @@ def DatabaseRecipe.operations (source target : DatabaseRecipe) :
     (inserts.find? (·.1 == name)).map fun t => Std.HashMap.Operation.insert t.1 t.2
   letI orderedRemoves := dropOrder.reverse.map Std.HashMap.Operation.remove
   others ++ orderedRemoves ++ orderedInserts
+
+/-- The same recipe with the indexes of one table replaced.
+
+This is where indexes are attached to a schema built by the model layer: `@[model]` generates a
+table without any, because which of a structure's fields are worth an index is not something the
+structure says. `tableIndexes` names the columns through the table's own index type, so the
+strings this takes are not written by hand:
+
+```lean
+def indexedDb : DatabaseRecipe :=
+  (%database mydb).recipe.withIndexes "book" <| tableIndexes BookIndex
+    [{ name := "idx_book_author", keys := [{ column := .author }] }]
+```
+-/
+def DatabaseRecipe.withIndexes (r : DatabaseRecipe) (table : String)
+    (indexes : List (TableIndex String)) : DatabaseRecipe where
+  tables := r.tables.map fun name t =>
+    if name == table then { t with indexes := indexes } else t
+
+/-- A change to the indexes of a database. -/
+inductive IndexOperation where
+  | create (table : String) (index : TableIndex String)
+  | drop (table : String) (name : String)
+  deriving Repr
+
+/-- The index operations that bring `source` to `target`.
+
+Only the index *names* the target declares are managed. A declared index that is missing is
+created; one that exists in another shape is dropped and re-created, neither backend being able to
+alter an index in place. An index the database has under a name the target does not mention is left
+alone: `autoUpdate` is not the only thing that may have created an index, and dropping one it did
+not put there is not a migration, it is data loss of the kind that only shows up as a slow query
+much later.
+
+Only tables the target declares are considered; one that is about to be dropped takes its indexes
+with it. -/
+def DatabaseRecipe.indexOperations (source target : DatabaseRecipe) : Array IndexOperation :=
+  Id.run do
+    let mut res := #[]
+    for (name, targetTable) in target.tables.toList do
+      let sourceIndexes := (source.tables[name]?.map (·.indexes)).getD []
+      for idx in targetTable.indexes do
+        match sourceIndexes.find? (·.name == idx.name) with
+        | some existing =>
+          unless existing == idx do
+            -- The name has to be freed before it can be taken again.
+            res := res.push (.drop name idx.name)
+            res := res.push (.create name idx)
+        | none => res := res.push (.create name idx)
+    return res
 
 /-- The names of the tables that exist in both schemas but declare different constraints.
 

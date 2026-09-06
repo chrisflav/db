@@ -46,6 +46,10 @@ class DBMonadWithMigrations (m : Type → Type) where
   currentDatabase : m DatabaseRecipe
   /- Execute the given operation. -/
   execute (op : DatabaseOperation) : m Unit
+  /-- Create or drop one index. Separate from `execute` because the operation language describes
+  column changes only, and an index is not one: it is an object beside the table, said whole by a
+  single `CREATE INDEX` or `DROP INDEX`. -/
+  executeIndex (op : IndexOperation) : m Unit
   /-- Give up on a migration that cannot be carried out, reporting why. -/
   abort {α : Type} (message : String) : m α
 
@@ -75,5 +79,12 @@ def autoUpdate (target : DatabaseRecipe) : m Unit := do
         "of the target schema. A constraint change on an existing table is not migrated; " ++
         "migrate these by hand, or drop and recreate the tables."
   executeMany <| source.operations target
+  -- Indexes after the columns, and against the schema as it now is rather than as it was: an index
+  -- on a column this migration just added cannot be created before the column exists, and SQLite
+  -- rebuilds a table to change a column type, which takes that table's indexes with it and puts
+  -- them back. Reading the schema again is what makes both of those come out right.
+  let migrated ← currentDatabase
+  for op in migrated.indexOperations target do
+    executeIndex op
 
 end DBMonadWithMigrations

@@ -123,6 +123,25 @@ and may only name a column of the table given to `select`. The clauses are appli
 result in the order `ORDER BY`, `OFFSET`, `LIMIT`, so a `limit` selects the first rows of the
 sorted result. The same is available on a `QuerySet` as `.orderBy`, `.limit` and `.offset`.
 
+A key may say how it compares and where it puts its `NULL`s:
+
+```lean
+query% do
+  let b ← from Book
+  select b
+  order_by b.title nocase
+  order_by b.year nulls_last
+```
+
+`nocase` folds case, and `nulls_first`/`nulls_last` place the nulls — worth saying explicitly,
+since both backends sort `NULL`s first ascending and last descending, so a query that wants them
+consistently at one end has to ask. On a `SortKey` these are the `collation` and `nulls` fields.
+
+`nocase` is emitted as `lower(...)` rather than as a declared collation: SQLite's `NOCASE` and
+PostgreSQL's collations have nothing in common, `lower` is in both and folds ASCII the way `NOCASE`
+does, and being an ordinary expression it is something both can build an index on — which is what
+lets an index declared `caseInsensitive` serve an `ORDER BY ... nocase`.
+
 `HasModel.count` counts the rows a query set matches without fetching them:
 
 ```lean4
@@ -223,6 +242,51 @@ a column that is exactly its `INTEGER PRIMARY KEY`, so a schema whose generated 
 whole primary key is refused there rather than created with a key nobody declared. Table creations
 are ordered so that a table comes after the tables its foreign keys reference, and drops in the
 reverse.
+
+## Indexes
+
+A `Table` declares indexes beside its constraints. Each has a name — which is what `DROP INDEX`
+takes, and which both backends require to be unique across the whole database — and a list of keys,
+each with the same direction and collation a `SortKey` has, so that an index can be declared to
+match the `ORDER BY` it is meant to serve:
+
+```lean
+def noteTable : Table where
+  Index := NoteIndex
+  columns := ...
+  indexes :=
+    [{ name := "idx_note_state", keys := [{ column := .state }] },
+     { name := "idx_note_title", keys := [{ column := .title, collation := .caseInsensitive },
+                                          { column := .id }] },
+     { name := "idx_note_tag", keys := [{ column := .tag }], unique := true }]
+```
+
+Unlike a constraint change, an index change **is** migrated: `CREATE INDEX` and `DROP INDEX` say
+the whole of it, where a constraint change would mean rebuilding the table. `autoUpdate` creates a
+declared index that is missing, and drops and re-creates one whose keys or uniqueness changed,
+neither backend being able to alter an index in place.
+
+It manages only the index *names* the target declares. An index the database has under a name the
+schema does not mention is left alone: `autoUpdate` is not the only thing that may have created an
+index, and dropping one it did not put there is not a migration.
+
+`@[model]` generates a table with no indexes, because which of a structure's fields are worth an
+index is not something the structure says. Declare them against the recipe, naming the columns
+through the generated index type:
+
+```lean
+def indexedDb : DatabaseRecipe :=
+  (%database mydb).recipe.withIndexes "book" <| tableIndexes BookIndex
+    [{ name := "idx_book_author", keys := [{ column := .author }] }]
+
+autoUpdate indexedDb
+```
+
+Both backends read their indexes back by parsing the `CREATE INDEX` text they store, since neither
+reports the keys in a structured form that an expression key survives. PostgreSQL hands the
+definition back in its own spelling rather than the one it was given — a `lower(title)` on a
+`varchar` column comes back as `lower((title)::text)` — which is normalised on the way in, so that
+`autoUpdate` reaches a fixed point on both.
 
 The operation language describes column changes only, so a **constraint change on an existing
 table is not migrated**. Rather than applying such a migration as a silent no-op, `autoUpdate`
