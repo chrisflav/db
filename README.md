@@ -78,6 +78,32 @@ git = "https://github.com/chrisflav/db"
 rev = "master"
 ```
 
+`import Db` gives the query language, the model layer, the migrations and the **SQLite** backend.
+SQLite is included because `leansqlite` vendors the database itself, so it costs a dependent package
+nothing but the build.
+
+### The PostgreSQL backend
+
+PostgreSQL is an FFI binding against libpq, so it is behind `import Db.Postgres` rather than in the
+root module: a package that never opens a PostgreSQL connection should not need the PostgreSQL
+headers to build or libpq to link.
+
+A package that *does* use it has to name libpq in its own link arguments, because Lake does not
+propagate a dependency's link arguments to the packages that depend on it — only the FFI object
+itself, which then has nothing to resolve its `PQ*` calls against:
+
+```lean
+lean_exe myapp where
+  root := `Main
+  -- The absolute path, not `-L/usr/lib/... -lpq`: the toolchain ships its own C runtime, and
+  -- putting the system library directory on the linker's search path makes it resolve glibc there
+  -- too. Ask `pg_config --libdir` where libpq is on the machine you are building on.
+  moreLinkArgs := #["/usr/lib/x86_64-linux-gnu/libpq.so"]
+```
+
+`lakefile.lean` here does this with `pg_config`, in `libpqLinkArgs`, which is worth copying if you
+build on more than one platform.
+
 ## Query conditions
 
 Inside a `query% do` block a `guard` is an ordinary Lean term over the bound row variables, which
