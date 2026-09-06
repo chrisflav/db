@@ -323,11 +323,32 @@ end
 def interpretation : Interpretation Select where
   fromQuery _ := Select.fromQuery
 
+/-- What an insert does with a row that conflicts with one already stored. -/
+inductive ConflictClause where
+  | error
+  | ignore
+  | update (target : List String) (set : List String)
+
+/-- The `ON CONFLICT` clause, which both backends spell the same way — SQLite has had it since
+3.24, so its own `INSERT OR IGNORE` is not needed and one spelling serves both.
+
+`DO UPDATE` with nothing to set is `DO NOTHING`: an update that assigns no column is not a
+statement, and doing nothing is what it would have amounted to. -/
+def ConflictClause.toString : ConflictClause → String
+  | .error => ""
+  | .ignore => " ON CONFLICT DO NOTHING"
+  | .update _ [] => " ON CONFLICT DO NOTHING"
+  | .update target set =>
+    letI assignments := ", ".intercalate (set.map fun c => s!"{c} = excluded.{c}")
+    s!" ON CONFLICT ({", ".intercalate target}) DO UPDATE SET {assignments}"
+
 structure Insert where
   intoTable : String
   values : List (String × Expr)
   /-- The columns the statement returns, empty for one that returns nothing. -/
   returning : List String := []
+  /-- What to do with a row that conflicts with one already stored. -/
+  onConflict : ConflictClause := .error
 
 def Insert.fromInsert {d : Database} {tableName : d.Index} (ins : d.Insert tableName) : Insert where
   intoTable := ToString.toString tableName
@@ -337,6 +358,11 @@ def Insert.fromInsert {d : Database} {tableName : d.Index} (ins : d.Insert table
     (Enum.all (d.tables tableName).Index).toList.filterMap
       fun colName =>
         (ins.value colName).map (fun val => (ToString.toString colName, Expr.ofValue val))
+  onConflict :=
+    match ins.onConflict with
+    | .error => .error
+    | .ignore => .ignore
+    | .update target set => .update (target.map ToString.toString) (set.map ToString.toString)
 
 /-- The `RETURNING` clause a statement carries when it is asked for its rows.
 
@@ -356,12 +382,13 @@ def Insert.toString (ins : Insert) : String :=
   -- An insert that supplies no column at all has to be written `DEFAULT VALUES`; the empty column
   -- and value lists are a syntax error.
   if ins.values.isEmpty then
-    s!"INSERT INTO {ins.intoTable} DEFAULT VALUES{returningClause ins.returning}"
+    s!"INSERT INTO {ins.intoTable} DEFAULT VALUES" ++
+      ins.onConflict.toString ++ returningClause ins.returning
   else
     letI columns := ", ".intercalate (ins.values.map Prod.fst)
     letI values := ", ".intercalate (ins.values.map fun x => x.2.toString)
     s!"INSERT INTO {ins.intoTable} ({columns}) VALUES ({values})" ++
-      returningClause ins.returning
+      ins.onConflict.toString ++ returningClause ins.returning
 
 /-- An `UPDATE` statement targeting a single table. -/
 structure Update where

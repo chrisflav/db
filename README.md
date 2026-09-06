@@ -254,6 +254,26 @@ let tag ← HasModel.insertReturning ({ id := 0, label := v"urgent" } : Tag)
 IO.println s!"the database assigned id {tag.id}"
 ```
 
+An insert can say what to do with a row it cannot store because storing it would violate a
+uniqueness constraint — a primary key, a `UNIQUE` group, or a unique index:
+
+```lean
+-- Skip the row if one conflicting with it is already there. Returns whether it was inserted.
+let stored ← HasModel.insertIfAbsent ({ id := 0, label := v"urgent" } : Tag)
+
+-- Or overwrite: on a conflict on `id`, set `label` to the value this insert carried.
+let rows ← HasModel.upsert ({ id := 1, label := v"urgent" } : Tag) [.id] [.label]
+```
+
+On a `Database.Insert` this is the `onConflict` field, `.error` (the default), `.ignore`, or
+`.update target set`. It is emitted as `ON CONFLICT ... DO NOTHING`/`DO UPDATE`, which both
+backends have — SQLite since 3.24, so its own `INSERT OR IGNORE` is not needed and one spelling
+serves both. `DO UPDATE` needs a conflict target on both: neither will guess which constraint an
+update is meant to resolve.
+
+A skipped row is a row the statement did not store, so `insertReturning` on an `.ignore` insert
+returns no rows rather than the row that was already there.
+
 `DBMonadTransactional.withTransaction` groups several operations into one atomic unit, committing
 if the block succeeds and rolling back if it fails. A nested call is a savepoint, so its failure
 discards only its own work while an outer failure still discards everything. On PostgreSQL only a

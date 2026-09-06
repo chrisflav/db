@@ -82,6 +82,30 @@ example : QuerySet Author := query% do
 
 end DSLChecks
 
+/-- Conflict handling against a real server: PostgreSQL is stricter than SQLite about `ON CONFLICT`,
+requiring a conflict target for `DO UPDATE`, so the generated statement is worth running there. -/
+def conflictTest : IO Unit := do
+  let x : PostgreSQL.M Unit := do
+    autoUpdate (%database mydb)
+    let _ ← HasModel.delete (α := Tag) .true
+    let tag (id : Int) (label : VarChar 50) :
+        (HasModel.database Tag).Insert (HasModel.model Tag).index :=
+      { value
+          | TagIndex.id => some id
+          | TagIndex.label => some label }
+    DBMonad.insert (d := HasModel.database Tag) (tag 1 (v"urgent"))
+    let ignored ← DBMonad.insertReturning (d := HasModel.database Tag)
+      { tag 1 (v"ignored") with onConflict := .ignore }
+    IO.println s!"Rows stored by the ignored insert (PostgreSQL): {ignored.size}"
+    let updated ← DBMonad.insertReturning (d := HasModel.database Tag)
+      { tag 1 (v"upserted") with onConflict := .update [TagIndex.id] [TagIndex.label] }
+    IO.println <|
+      s!"Rows stored by the upserting insert (PostgreSQL): {updated.size}, " ++
+      s!"label now {(updated[0]?.map (fun e => toString (e.value TagIndex.label))).getD "?"}"
+  match ← PostgreSQL.runDB "postgresql://testuser:secret@localhost/testdb2" x with
+  | .error e => IO.println s!"Error occured: {repr e}."
+  | .ok _ => pure ()
+
 def test : IO Unit := do
   let x : PostgreSQL.M (Array Book) := do
     -- Update database schema to target schema
