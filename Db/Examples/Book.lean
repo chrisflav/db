@@ -82,6 +82,29 @@ example : QuerySet Author := query% do
 
 end DSLChecks
 
+/-- The left outer join against a real server. -/
+def leftJoinTest : IO Unit := do
+  let x : PostgreSQL.M Unit := do
+    autoUpdate (%database mydb)
+    let _ ← HasModel.delete (α := Book) .true
+    let _ ← HasModel.delete (α := Author) .true
+    insert mike
+    insert novel
+    insert { title := v"Anonymous", author := v"Nobody", year := none : Book }
+    let joined : Query (%database mydb) _ :=
+      .leftJoin (.all (HasModel.model Book).index) (.all (HasModel.model Author).index)
+        (.eq (.var (Sum.inl BookIndex.author) (.varchar 100))
+             (.var (Sum.inr AuthorIndex.name) (.varchar 100)))
+    let rows ← DBMonad.lookup joined
+    IO.println "Books with their author, left-joined (PostgreSQL):"
+    for row in rows do
+      IO.println <|
+        s!"  {row.value (Sum.inl BookIndex.title)} — " ++
+        s!"author age {row.value (Sum.inr AuthorIndex.age)}"
+  match ← PostgreSQL.runDB "postgresql://testuser:secret@localhost/testdb2" x with
+  | .error e => IO.println s!"Error occured: {repr e}."
+  | .ok _ => pure ()
+
 def test : IO Unit := do
   let x : PostgreSQL.M (Array Book) := do
     -- Update database schema to target schema

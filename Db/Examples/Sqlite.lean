@@ -687,6 +687,27 @@ def migrationDemo : Sqlite.M Unit := do
   let pending := (← currentDatabase).operations widgetV2
   IO.println s!"Pending operations after migration: {pending.size}"
 
+/-- Exercise the left outer join: every book, with its author's row where there is one and `NULL`
+throughout the author's columns where there is not. -/
+def leftJoinDemo : Sqlite.M Unit := do
+  autoUpdate (%database mydb)
+  insert mike
+  insert novel
+  -- No author row for this one, so it is the book whose author columns come back `NULL`.
+  insert { title := v"Anonymous", author := v"Nobody", year := none : Book }
+  let bookTable := (HasModel.model Book).index
+  let authorTable := (HasModel.model Author).index
+  let joined : Query (%database mydb) _ :=
+    .leftJoin (.all bookTable) (.all authorTable)
+      (.eq (.var (Sum.inl BookIndex.author) (.varchar 100))
+           (.var (Sum.inr AuthorIndex.name) (.varchar 100)))
+  let rows ← DBMonad.lookup joined
+  IO.println "Books with their author, left-joined:"
+  for row in rows do
+    letI title := row.value (Sum.inl BookIndex.title)
+    letI age := row.value (Sum.inr AuthorIndex.age)
+    IO.println s!"  {title} — author age {age}"
+
 /-- Run both demos against a fresh in-memory SQLite database. -/
 def test : IO Unit := do
   Sqlite.runDB ":memory:" bookDemo
@@ -698,5 +719,6 @@ def test : IO Unit := do
   Sqlite.runDB ":memory:" quirkDemo
   Sqlite.runDB ":memory:" writeDemo
   Sqlite.runDB ":memory:" migrationDemo
+  Sqlite.runDB ":memory:" leftJoinDemo
 
 end SqliteExample

@@ -11,11 +11,15 @@ namespace SQL
 inductive JoinType where
   | inner
   | outer
+  | leftOuter
   deriving Repr
 
+/-- Includes the `JOIN` itself, so that `NATURAL {this}` and `{left} {this} {right}` both come out
+as the SQL they mean. `OUTER JOIN` on its own is not a join either database accepts. -/
 def JoinType.toString : JoinType → String
-  | .inner => "INNER"
-  | .outer => "OUTER"
+  | .inner => "INNER JOIN"
+  | .outer => "FULL OUTER JOIN"
+  | .leftOuter => "LEFT OUTER JOIN"
 
 mutual
 
@@ -271,6 +275,17 @@ partial def Select.fromQuery {d : Database} {view : View d} (q : Query d view)
     letI s₂ : Select := Select.fromQuery q₂ (view₁.prod view₂) (View.sumInr _ _)
     { selector := .all
       from_ := .crossJoin (.select s₁ none) (.select s₂ none)
+      condition := .true }
+  | .leftJoin (s := view₁) (t := view₂) q₁ q₂ on =>
+    -- The sides are aliased through the product of the two views as they are, not through the
+    -- product with the right-hand side nullable. The two have the same index type and so the same
+    -- alias for every column; making the right nullable changes what a row may hold, not what the
+    -- columns are called, which is all the aliasing depends on.
+    letI s₁ : Select := Select.fromQuery q₁ (view₁.prod view₂) (View.sumInl _ _)
+    letI s₂ : Select := Select.fromQuery q₂ (view₁.prod view₂) (View.sumInr _ _)
+    { selector := .all
+      from_ :=
+        .join (.select s₁ none) (.select s₂ none) .leftOuter (.onCondition (Expr.fromExpr on))
       condition := .true }
   | .project (s := s) (t := view) projection query =>
     letI select : Select := Select.fromQuery query
