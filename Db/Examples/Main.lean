@@ -1,7 +1,8 @@
 import Db.Examples
 
+/-- The self-contained half of the example suite: the SQLite backend against a temporary database,
+    needing no server and no libpq. This is what `lake test` runs.
+
+    The PostgreSQL examples are `lake exe testdb-postgres`. -/
 def main : IO Unit := do
-  -- Self-contained demo using the SQLite backend (no external server required).
   SqliteExample.test
-  -- Demo using the PostgreSQL backend (requires a running PostgreSQL server).
-  BookExample.test
