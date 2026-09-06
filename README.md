@@ -148,6 +148,19 @@ def booksPerAuthor : Query mydb booksPerAuthorView :=
 
 `AVG` is missing because `DBType` has no floating-point type to give its result.
 
+`Query.extend` adds a column computed from the row it belongs to, which is what a `SELECT` list
+does beyond naming columns — `project` renames and drops them and `aggregate` computes over a
+group, but neither computes a value from the row in front of it:
+
+```lean
+let inTenYears : Query mydb _ :=
+  .extend "age_in_10" { type := .int, nullable := false }
+    (.add (.var AuthorIndex.age .int) (.int 10))
+    (.all (HasModel.model Author).index)
+```
+
+`DBExpr` has `add`, `sub` and `mul`, on integers only, `DBType` having no other numeric type.
+
 `Query.correlate` computes one such aggregate per row of an outer query, over the rows of a
 subquery correlated with that row — the `(SELECT COUNT(*) FROM child WHERE child.parent =
 parent.id)` of a `SELECT` list:

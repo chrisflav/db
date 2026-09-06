@@ -50,6 +50,9 @@ inductive Expr where
   | column (table column : String)
   | str (s : String)
   | int (n : Int)
+  | add (e₁ e₂ : Expr)
+  | sub (e₁ e₂ : Expr)
+  | mul (e₁ e₂ : Expr)
   | null
 
 inductive Selector where
@@ -130,6 +133,9 @@ partial def Expr.toString : Expr → String
   | .var name => name
   | .str s => quoteString s
   | .int n => ToString.toString n
+  | .add e₁ e₂ => s!"({e₁.toString}) + ({e₂.toString})"
+  | .sub e₁ e₂ => s!"({e₁.toString}) - ({e₂.toString})"
+  | .mul e₁ e₂ => s!"({e₁.toString}) * ({e₂.toString})"
   | .null => "NULL"
 
 partial def Selector.toString : Selector → String
@@ -236,6 +242,9 @@ partial def Expr.fromExpr {d : Database} {view : View d} {t : DBType} : DBExpr d
   | .inList (t := t) e values =>
     .inList (Expr.fromExpr e) (values.map (Expr.ofDBTypeValue (t := t)))
   | .inSubquery e q col _ => .inSelect (Expr.fromExpr e) (Select.column q col)
+  | .add e₁ e₂ => .add (Expr.fromExpr e₁) (Expr.fromExpr e₂)
+  | .sub e₁ e₂ => .sub (Expr.fromExpr e₁) (Expr.fromExpr e₂)
+  | .mul e₁ e₂ => .mul (Expr.fromExpr e₁) (Expr.fromExpr e₂)
   | .str s => .str s.1
   | .int n => .int n
   | .null _ => .null
@@ -310,6 +319,17 @@ partial def Select.fromQuery {d : Database} {view : View d} (q : Query d view)
     -- limits its rows would be applied in the wrong order.
     letI s := if inner.limit.isSome || inner.offset.isSome then inner.wrap else inner
     { s with offset := some n }
+  | .extend (view := view) name _ e q =>
+    -- The source keeps its own aliases, which is what the expression's column references are
+    -- written in terms of; only the output is renamed to what the enclosing query asked for.
+    letI inner : Select := Select.fromQuery q
+    { selector :=
+        .fields <|
+          ((Enum.all view.Index).toList.map fun idx =>
+            (s!"{emb.map (Sum.inl idx)}", Expr.var (view.alias idx))) ++
+          [(s!"{emb.map (Sum.inr ⟨⟩)}", Expr.fromExpr e)]
+      from_ := .select inner none
+      condition := .true }
   | .correlate (outer := outer) (inner := inner) name q sub on agg _ =>
     -- The two sides are aliased through `outer.prod inner`, which is the view `on` is written
     -- over: the outer rows come back as `left__*` and the subquery's as `right__*`, so the
