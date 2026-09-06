@@ -548,6 +548,12 @@ inductive DBExpr (d : Database) : View d → DBType → Type 1 where
   literal index is checked by the default `rfl`. -/
   | var {view : View d} (i : view.Index) (t : DBType)
       (h : (view.name i).dbtype = t := by rfl) : DBExpr d view t
+  /-- Addition. Only on integers, `DBType` having no other numeric type. -/
+  | add {view : View d} (e₁ e₂ : DBExpr d view .int) : DBExpr d view .int
+  /-- Subtraction. -/
+  | sub {view : View d} (e₁ e₂ : DBExpr d view .int) : DBExpr d view .int
+  /-- Multiplication. -/
+  | mul {view : View d} (e₁ e₂ : DBExpr d view .int) : DBExpr d view .int
   /-- A string literal. -/
   | str {view : View d} {n : Nat} (s : VarChar n) : DBExpr d view (.varchar n)
   /-- An integer literal. -/
@@ -578,6 +584,14 @@ inductive Query (d : Database) : View d → Type 1 where
   | offset {view : View d} (n : Nat) (q : Query d view) : Query d view
   /-- Group the rows of `q` and aggregate each group into a row of `out`. -/
   | aggregate {source out : View d} (a : Aggregation source out) (q : Query d source) : Query d out
+  /--
+  Extend every row of `q` with a column computed from that row.
+
+  This is what a `SELECT` list does beyond naming columns: `project` renames and drops them, and
+  `aggregate` computes over a group, but neither computes a value from the row in front of it.
+  -/
+  | extend {view : View d} (name : String) (c : Column) (e : DBExpr d view c.type)
+      (q : Query d view) : Query d (view.prod (View.singleton d name c))
   /--
   Extend every row of `q` with one value computed by a subquery over `sub`, correlated with that
   row: `on` is a condition over the outer row and the inner one together, and `agg` says what to

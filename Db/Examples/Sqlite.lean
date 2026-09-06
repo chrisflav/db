@@ -724,6 +724,23 @@ def correlateDemo : Sqlite.M Unit := do
     IO.println <|
       s!"  {row.value (Sum.inl AuthorIndex.name)}: {row.value (Sum.inr ⟨⟩)}"
 
+/-- Exercise computed columns and arithmetic: a column that is not read from a table but worked
+out from the row it belongs to. -/
+def extendDemo : Sqlite.M Unit := do
+  autoUpdate (%database mydb)
+  insert mike
+  insert lisa
+  insert nora
+  let inTenYears : Query (%database mydb) _ :=
+    .extend "age_in_10" { type := .int, nullable := false }
+      (.add (.var AuthorIndex.age .int) (.int 10))
+      (.all (HasModel.model Author).index)
+  IO.println "Authors and their age in ten years:"
+  for row in ← DBMonad.lookup inTenYears do
+    IO.println <|
+      s!"  {row.value (Sum.inl AuthorIndex.name)}: " ++
+      s!"{row.value (Sum.inl AuthorIndex.age)} -> {row.value (Sum.inr ⟨⟩)}"
+
 /-- Run both demos against a fresh in-memory SQLite database. -/
 def test : IO Unit := do
   Sqlite.runDB ":memory:" bookDemo
@@ -735,6 +752,7 @@ def test : IO Unit := do
   Sqlite.runDB ":memory:" quirkDemo
   Sqlite.runDB ":memory:" writeDemo
   Sqlite.runDB ":memory:" migrationDemo
+  Sqlite.runDB ":memory:" extendDemo
   Sqlite.runDB ":memory:" correlateDemo
 
 end SqliteExample
