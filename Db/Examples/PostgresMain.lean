@@ -9,6 +9,7 @@ def main : IO Unit := do
   BookExample.leftJoinTest
   BookExample.correlateTest
   BookExample.joinTest
+  BookExample.recursiveTest
   BookExample.extendTest
   BookExample.migrationsTest
   BookExample.identifierTest

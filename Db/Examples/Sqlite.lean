@@ -6,6 +6,7 @@ Authors: Christian Merten
 import Db.Examples.Schema
 import Db.Examples.Migrations
 import Db.Examples.Joins
+import Db.Examples.Recursive
 
 /-!
 # SQLite backend example
@@ -1063,6 +1064,7 @@ def test : IO Unit := do
   Sqlite.runDB ":memory:" conflictDemo
   Sqlite.runDB ":memory:" leftJoinDemo
   Sqlite.runDB ":memory:" (JoinExample.joinDemo "SQLite")
+  Sqlite.runDB ":memory:" (RecursiveExample.recursiveDemo "SQLite")
   Sqlite.runDB ":memory:" extendDemo
   Sqlite.runDB ":memory:" correlateDemo
   Sqlite.runDB ":memory:" modelConflictDemo

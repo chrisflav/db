@@ -7,6 +7,7 @@ import Db.Postgres
 import Db.Examples.Schema
 import Db.Examples.Migrations
 import Db.Examples.Joins
+import Db.Examples.Recursive
 
 /-!
 # PostgreSQL backend example
@@ -125,6 +126,16 @@ over the SQLite run is that PostgreSQL accepts it — it is the stricter of the 
 in a `FROM` needing an alias, and about the parenthesisation of a nested join. -/
 def joinTest : IO Unit := do
   match ← PostgreSQL.runDB (← postgresUrl) (JoinExample.joinDemo "PostgreSQL") with
+  | .error e => IO.println s!"Error occured: {repr e}."
+  | .ok _ => pure ()
+
+/-- The recursive-query demo against a real server. The statement is the same on both backends, so
+what this adds over the SQLite run is PostgreSQL's stricter typing of a `UNION ALL`: the two
+branches have to agree on the type of every column, which is why the base's depth is an integer
+literal against the step's `depth + 1` and the title comes from the table on both sides rather than
+from a string literal, whose type would be `text` against the column's `varchar(100)`. -/
+def recursiveTest : IO Unit := do
+  match ← PostgreSQL.runDB (← postgresUrl) (RecursiveExample.recursiveDemo "PostgreSQL") with
   | .error e => IO.println s!"Error occured: {repr e}."
   | .ok _ => pure ()
 

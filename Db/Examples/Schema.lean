@@ -41,6 +41,24 @@ structure Tag where
   label : VarChar 50
   deriving Repr
 
+/-- A node of a tree — or of whatever the `parent` references actually form, which is the point:
+the rows are walked by `Query.recursive`, and a cycle among them is something the walk has to
+survive rather than something the schema rules out.
+
+Part of the shared schema rather than of a schema of its own, because `autoUpdate` drops the tables
+its target does not declare and the PostgreSQL demos share one database: a target naming only
+`node` would take every other demo's tables with it. -/
+@[model (dbName := "node") mydb]
+structure Node where
+  /-- An `AutoKey`, so that the table has the primary key a node table would have. The demo
+  supplies the value anyway — a chain is easier to read with its ids written down than with ids
+  the database chose. -/
+  id : AutoKey
+  /-- The node this one hangs under; absent for a root. -/
+  parent : Option Int
+  title : VarChar 100
+  deriving Repr
+
 section Identifiers
 
 /-- A table that is nothing but awkward names: a mixed-case table name, a mixed-case column, and

@@ -315,6 +315,105 @@ nullable, being `NULL` for a row the subquery matches nothing for. The condition
 is rejected, a subquery returning one row per group not being a value a `SELECT` list has room
 for.
 
+## Recursive queries
+
+`Query.recursive` is SQL's `WITH RECURSIVE`: the rows of a base query, then repeatedly the rows of
+a step computed over the rows found so far, until a step finds nothing new. The step reaches those
+rows through `Query.cteRef`, which names the relation being defined:
+
+```lean
+| cteRef (name : String) (view : View d) : Query d view
+| recursive {view : View d} (name : String) (base : Query d view) (step : Query d view) :
+    Query d view
+```
+
+`base` and `step` produce the same view — the common table expression has one column list, and the
+`UNION ALL` joining the two matches its operands by position. Nothing in the types ties a `cteRef`
+to its `recursive`: `Query` is an inductive and cannot bind a variable, so the reference is by
+name, and a `cteRef` outside its `recursive` renders SQL naming a relation that does not exist.
+
+The worked example is an ancestor walk on a table that references itself, `node(id, parent, title)`.
+The walk carries a `depth` column, so the view it produces is a `node` row next to that:
+
+```lean
+abbrev depthColumn : Column := { type := .int, nullable := false }
+
+abbrev ancestorView : View mydb :=
+  (Table.view nodeIndex).prod (View.singleton mydb "depth" depthColumn)
+
+def ancestorsOf (start : Int) (bound : Int := 64) : Query mydb ancestorView :=
+  .recursive "ancestors"
+    -- The base: the row to start from, at depth 0.
+    (.extend "depth" depthColumn (.int 0)
+      (.filter (.eq (.var NodeIndex.id .int) (.int start)) (.all nodeIndex)))
+    -- The step: for every row found so far, the node its `parent` names, one step deeper.
+    (.project
+      (View.Hom.ofMap fun i =>
+        match i with
+        | Sum.inl col => Sum.inl (Sum.inr col)
+        | Sum.inr d => Sum.inr d)
+      (.filter
+        (.and
+          (.eq (.var (Sum.inl (Sum.inr NodeIndex.id)) .int)
+               (.var (Sum.inl (Sum.inl (Sum.inl NodeIndex.parent))) .int))
+          (.lt (.var (Sum.inl (Sum.inl (Sum.inr ⟨⟩))) .int) (.int bound)))
+        (.extend "depth" depthColumn
+          (.add (.var (Sum.inl (Sum.inr ⟨⟩)) .int) (.int 1))
+          (.join (.cteRef "ancestors" ancestorView) (.all nodeIndex)))))
+```
+
+The step joins the rows found so far with the whole table, so it is written over
+`(node × depth) × node`: `Sum.inl (Sum.inl _)` is a column of a row found so far,
+`Sum.inl (Sum.inr ⟨⟩)` is that row's depth, and `Sum.inr _` is a column of the candidate parent.
+The `extend` puts the new depth beside all of it and the `project` brings the result back onto
+`ancestorView`, which is the view `base` and `step` have to agree on. `View.Hom.ofMap` is the
+projection's map with its naming obligation discharged by splitting the index into cases and
+checking each by `rfl`; an index that needs more than one split takes the proof explicitly, as in
+`View.Hom.ofMap f (by rintro ((_ | _) | _) <;> rfl)`.
+
+Sorted by depth and run, that walk generates (reformatted here; it is emitted on one line):
+
+```sql
+WITH RECURSIVE "ancestors" AS (
+  SELECT "t1"."id" as "left__id", "t1"."parent" as "left__parent",
+         "t1"."title" as "left__title", 0 as "right__depth"
+    FROM "node" AS "t1" WHERE (true) AND (("t1"."id") = (4))
+  UNION ALL
+  SELECT "t3"."id" as "left__id", "t3"."parent" as "left__parent",
+         "t3"."title" as "left__title", ("t2"."right__depth") + (1) as "right__depth"
+    FROM "ancestors" AS "t2" CROSS JOIN "node" AS "t3"
+   WHERE ((true) AND (true))
+     AND ((("t3"."id") = ("t2"."left__parent")) AND (("t2"."right__depth") < (64))))
+SELECT "t4"."left__id" as "left__id", "t4"."left__parent" as "left__parent",
+       "t4"."left__title" as "left__title", "t4"."right__depth" as "right__depth"
+  FROM "ancestors" AS "t4" WHERE true ORDER BY "t4"."right__depth" ASC
+```
+
+The `WITH` belongs to the statement, not to the query that needed it: whatever is built around a
+`recursive` — an `ORDER BY`, a join, a filter — hoists the declaration to the top, which is the
+only place SQL accepts it. Nested statements never render a `WITH` of their own, and a top-level
+one is visible inside all of them.
+
+Three restrictions come with this:
+
+- **The step may name the CTE exactly once, and not inside a subquery.** That is SQLite's rule; it
+  rejects the other shape with `circular reference: ancestors`. A step built out of
+  `join`/`filter`/`extend`/`project`, like the one above, satisfies it, because those translate to
+  one flat `SELECT`. A step that aggregates, limits or orders forces a subquery around the part it
+  applies to and will fail on SQLite.
+- **The column types of `base` and `step` must agree per position**, and PostgreSQL is strict about
+  it. An `int` literal `0` against `depth + 1` is fine; a `DBExpr.str` against a `varchar(n)`
+  column is not — take the value from a column of the right type, or write the literal at that
+  type.
+- **`UNION ALL`, so a cycle has to be cut by the step.** A row reached twice is returned twice, and
+  a cycle among the `parent` references would be walked forever; the `depth < bound` conjunct above
+  is what stops it. Started inside a two-node cycle, the query above returns 65 rows — the starting
+  row and 64 steps — rather than not returning.
+
+Two `recursive` queries with the same name in one statement declare the same CTE twice and the
+database rejects the statement; names have to be unique per statement. They are not renamed for
+you, the name being what a reader of the generated SQL sees.
+
 ## Column types and defaults
 
 `DBType` covers `bool`, `int`, `varchar n` and unbounded `text`. A model field of type `String`
@@ -745,3 +844,9 @@ a correlated subquery can name an outer column unambiguously. Only the outermost
 its output columns, and it names them exactly as the view does, which is how the backends decode
 the rows. `Query.project` generates no SQL at all: it renames and drops output columns, and only
 that outermost `SELECT` list ever sees them.
+
+A common table expression is the one thing that cannot stay where it was needed: `WITH` is legal
+only at the top of a statement. So a translation carries the CTEs it needs, every combinator
+carries its operands' along, and the outermost statement is the one that renders them — which is
+why a `Query.recursive` buried under an `ORDER BY` or a join still comes out as a `WITH RECURSIVE`
+in front of the whole statement.

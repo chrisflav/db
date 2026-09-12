@@ -97,8 +97,7 @@ structure Select where
 
   They belong to the statement and not to the query that needed one: `WITH` is only legal at the
   top of a statement, so every combinator hoists the CTEs of its operands (see `Translation.ctes`)
-  and only the outermost `Select` renders them. Nothing produces a CTE yet; the field is here so
-  that recursive queries can be added without changing this shape again. -/
+  and only the outermost `Select` renders them. `Query.recursive` is what produces one. -/
   ctes : List CTE := []
 
 /-- A common table expression: `name AS (base)`, or `name AS (base UNION ALL step)` for a recursive
@@ -321,7 +320,8 @@ structure Translation {d : Database} (view : View d) where
   offset : Option Nat := none
   isAggregate : Bool := false
   /-- The common table expressions this query needs. They are hoisted through every combinator to
-  the enclosing statement, which is the only place a `WITH` may stand. Nothing produces one yet. -/
+  the enclosing statement, which is the only place a `WITH` may stand. `Query.recursive` is what
+  produces one. -/
   ctes : List CTE := []
 
 instance {d : Database} {view : View d} : Inhabited (Translation view) :=
@@ -422,7 +422,7 @@ side of an `IN`. No nesting: every clause of `q` is kept, only the `SELECT` list
 
 This is the one place a CTE would not be hoisted to the enclosing statement — the result is an
 `Expr`, which has nowhere to hoist to — so it renders its own `WITH`, which both backends accept
-inside a subquery expression. Nothing produces a CTE yet. -/
+inside a subquery expression. -/
 partial def Select.column {d : Database} {view : View d} (q : Query d view) (col : view.Index) :
     StateM Nat Select := do
   let t ← translate q
@@ -550,6 +550,30 @@ partial def translate {d : Database} {view : View d} (q : Query d view) :
     return { t with
              column := Sum.elim t.column (fun _ => .scalar scalar)
              ctes := t.ctes ++ s.ctes }
+  | .cteRef name view =>
+    -- A reference to a relation the enclosing statement declares, which stands in a `FROM` just as
+    -- a table does. Its columns carry the aliases of `view`, because the CTE's body is rendered by
+    -- `toSelect`, which is what names them so.
+    let a ← fresh
+    return { from_ := .tableName name (some a)
+             column := fun i => .column a (view.alias i) }
+  | .recursive (view := view) name base step =>
+    let b ← translate base
+    let s ← translate step
+    -- The two bodies are statements of their own, so the CTEs they need are hoisted out of them
+    -- and declared next to this one rather than inside it, a `WITH` being legal only at the top of
+    -- a statement. They go first, so that a CTE a body depends on is declared before it.
+    let cte : CTE :=
+      { name := name
+        recursive := true
+        base := { b.toSelect with ctes := [] }
+        step := some { s.toSelect with ctes := [] } }
+    -- What the query denotes is the CTE's rows, which is a reference to it — the same `FROM` and
+    -- the same column expressions `.cteRef` builds, with the declaration carried along.
+    let a ← fresh
+    return { from_ := .tableName name (some a)
+             column := fun i => .column a (view.alias i)
+             ctes := b.ctes ++ s.ctes ++ [cte] }
 
 end
 

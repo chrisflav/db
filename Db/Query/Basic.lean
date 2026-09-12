@@ -405,6 +405,21 @@ def View.Hom.comp {d : Database} {view₁ view₂ view₃ : View d} (f : view₁
   map := g.map ∘ f.map
   name_map _ := by simp
 
+/-- The `View.Hom` given by `map`, with the obligation that it preserves names discharged by
+splitting the index into cases and checking each by `rfl`.
+
+Writing a `Query.project` by hand means writing such a `Hom`, and its obligation is invariably
+true by computation: both sides are the very same `Database.Name`, reached through two different
+index types. Spelling `name_map` out at every use site is boilerplate that says nothing, and the
+`by intro i; cases i <;> rfl` it amounts to is easy to get subtly wrong when the index is a nested
+sum. An index that needs more than one split — `(a ⊕ b) ⊕ c` — is handled by passing the proof
+explicitly, e.g. `by rintro ((_ | _) | _) <;> rfl`. -/
+def View.Hom.ofMap {d : Database} {view₁ view₂ : View d} (map : view₁.Index → view₂.Index)
+    (name_map : ∀ idx, view₂.name (map idx) = view₁.name idx := by intro i; cases i <;> rfl) :
+    view₁.Hom view₂ where
+  map := map
+  name_map := name_map
+
 def View.sumInl {d : Database} (view₁ view₂ : View d) : Hom view₁ (view₁.prod view₂) where
   map := Sum.inl
   name_map _ := rfl
@@ -700,6 +715,36 @@ inductive Query (d : Database) : View d → Type 1 where
       (on : DBExpr d (outer.prod inner) .bool) (agg : AggregateEntry inner)
       (h : agg.groupColumn.isNone = true := by rfl) :
       Query d (outer.prod (View.singleton d name agg.column))
+  /--
+  The rows of the recursive relation `name`: usable only inside the `step` of a
+  `Query.recursive name`, where it stands for the rows found so far.
+
+  Nothing in the types ties the two together. `Query` is an inductive and cannot bind a variable,
+  so the reference is by name, and a `cteRef` outside its `recursive` renders SQL naming a relation
+  that does not exist. The alternative — a higher-order `recursive` taking its step as a function of
+  a query — would tie them, at the price of `Query` no longer being an ordinary inductive, which is
+  what everything traversing one relies on.
+  -/
+  | cteRef (name : String) (view : View d) : Query d view
+  /--
+  A recursive common table expression: the rows of `base`, then repeatedly the rows of `step`
+  computed over the rows found so far — which `step` reaches through `cteRef name view` — until a
+  step finds nothing new.
+
+  `base` and `step` produce the same view: the CTE has one column list, and the `UNION ALL` that
+  joins the two matches its operands by position. `UNION ALL` and not `UNION`: a row reached twice
+  is returned twice, so a `step` over a graph that may contain a cycle has to bound itself,
+  typically by carrying a depth column and comparing it with `DBExpr.lt` — see the README.
+  Deduplicating with `UNION` instead would cut the simplest cycles only, not one whose rows differ
+  in a column such as that depth, and it would silently drop rows the user asked for; a bound the
+  step states is the honest version.
+
+  The name is what the reader of the generated SQL sees, so it is taken as given rather than made
+  unique: two `recursive` queries with the same name in one statement declare the same CTE twice,
+  and the database rejects the statement. Names have to be unique per statement.
+  -/
+  | recursive {view : View d} (name : String) (base : Query d view) (step : Query d view) :
+      Query d view
 
 end
 
