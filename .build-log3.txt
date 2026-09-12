@@ -1,0 +1,28 @@
+✔ [146/155] Built Db.Examples.Sqlite (8.3s)
+✔ [148/155] Built Db.Examples (1.5s)
+✔ [151/155] Built Db.Examples.Book:c.o (7.3s)
+✔ [153/155] Built Db.Examples.Main (1.3s)
+✔ [155/155] Built testdb:exe (9.0s)
+Some required targets logged failures:
+- Db.Examples.Fish
+error: build failed
+PGBUILD EXIT: 1
+⚠ [23/126] Replayed Db.Migration.Basic
+warning: Db/Migration/Basic.lean:47:8: declaration uses `sorry`
+warning: Db/Migration/Basic.lean:89:8: declaration uses `sorry`
+warning: Db/Migration/Basic.lean:124:4: declaration uses `sorry`
+warning: Db/Migration/Basic.lean:130:4: declaration uses `sorry`
+SQLITE TEST EXIT: 0
+⚠ [27/38] Replayed Db.Migration.Basic
+warning: Db/Migration/Basic.lean:47:8: declaration uses `sorry`
+warning: Db/Migration/Basic.lean:89:8: declaration uses `sorry`
+warning: Db/Migration/Basic.lean:124:4: declaration uses `sorry`
+warning: Db/Migration/Basic.lean:130:4: declaration uses `sorry`
+✖ [138/144] Building Db.Examples.Fish (1.0s)
+trace: .> LEAN_PATH=/home/christian/db-integration/.lake/packages/quot4/.lake/build/lib/lean:/home/christian/db-integration/.lake/packages/leansqlite/.lake/build/lib/lean:/home/christian/db-integration/.lake/build/lib/lean /home/christian/.elan/toolchains/leanprover--lean4---v4.31.0/bin/lean /home/christian/db-integration/Db/Examples/Fish.lean -o /home/christian/db-integration/.lake/build/lib/lean/Db/Examples/Fish.olean -i /home/christian/db-integration/.lake/build/lib/lean/Db/Examples/Fish.ilean -c /home/christian/db-integration/.lake/build/ir/Db/Examples/Fish.c --setup /home/christian/db-integration/.lake/build/ir/Db/Examples/Fish.setup.json --json
+error: Db/Examples/Fish.lean:174:32: Unknown identifier `BookExample.postgresUrl`
+error: Lean exited with code 1
+Some required targets logged failures:
+- Db.Examples.Fish
+error: build failed
+PGTEST EXIT: 1

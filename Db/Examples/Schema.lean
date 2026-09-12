@@ -41,6 +41,11 @@ structure Tag where
   label : VarChar 50
   deriving Repr
 
+/-- The connection string the PostgreSQL examples use: `DB_POSTGRES_URL` if it is set, so that the
+suite can be pointed at another server or database, and the local test database otherwise. -/
+def postgresUrl : IO String := do
+  return (← IO.getEnv "DB_POSTGRES_URL").getD "postgresql://testuser:secret@localhost/testdb2"
+
 open HasModel DBMonadWithMigrations
 
 def mike : Author where

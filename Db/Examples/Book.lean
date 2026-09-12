@@ -43,7 +43,7 @@ def indexTest : IO Unit := do
     let current ← currentDatabase
     for idx in (current.tables["book"]?.map (·.indexes)).getD [] do
       IO.println s!"  read back: {repr idx}"
-  match ← PostgreSQL.runDB "postgresql://testuser:secret@localhost/testdb2" x with
+  match ← PostgreSQL.runDB (← postgresUrl) x with
   | .error e => IO.println s!"Error occured: {repr e}."
   | .ok _ => pure ()
 
@@ -67,7 +67,7 @@ def conflictTest : IO Unit := do
     IO.println <|
       s!"Rows stored by the upserting insert (PostgreSQL): {updated.size}, " ++
       s!"label now {(updated[0]?.map (fun e => toString (e.value TagIndex.label))).getD "?"}"
-  match ← PostgreSQL.runDB "postgresql://testuser:secret@localhost/testdb2" x with
+  match ← PostgreSQL.runDB (← postgresUrl) x with
   | .error e => IO.println s!"Error occured: {repr e}."
   | .ok _ => pure ()
 
@@ -90,7 +90,7 @@ def leftJoinTest : IO Unit := do
       IO.println <|
         s!"  {row.value (Sum.inl BookIndex.title)} — " ++
         s!"author age {row.value (Sum.inr AuthorIndex.age)}"
-  match ← PostgreSQL.runDB "postgresql://testuser:secret@localhost/testdb2" x with
+  match ← PostgreSQL.runDB (← postgresUrl) x with
   | .error e => IO.println s!"Error occured: {repr e}."
   | .ok _ => pure ()
 
@@ -114,7 +114,7 @@ def correlateTest : IO Unit := do
     IO.println "Authors and how many books they wrote (PostgreSQL):"
     for row in ← DBMonad.lookup counted do
       IO.println s!"  {row.value (Sum.inl AuthorIndex.name)}: {row.value (Sum.inr ⟨⟩)}"
-  match ← PostgreSQL.runDB "postgresql://testuser:secret@localhost/testdb2" x with
+  match ← PostgreSQL.runDB (← postgresUrl) x with
   | .error e => IO.println s!"Error occured: {repr e}."
   | .ok _ => pure ()
 
@@ -134,7 +134,7 @@ def test : IO Unit := do
       guard b.author = a.name
       guard a.retired
       select b
-  let res ← PostgreSQL.runDB "postgresql://testuser:secret@localhost/testdb2" x
+  let res ← PostgreSQL.runDB (← postgresUrl) x
   match res with
   | .error e => IO.println s!"Error occured: {repr e}."
   | .ok books =>

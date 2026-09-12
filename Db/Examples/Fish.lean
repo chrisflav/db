@@ -4,6 +4,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Christian Merten
 -/
 import Db.Postgres
+import Db.Examples.Schema
 
 namespace FishExample
 
@@ -171,7 +172,7 @@ def test : IO Unit := do
   let x : PostgreSQL.M _ := do
     _ ← DBMonad.insert ins
     DBMonad.lookup q
-  let res ← PostgreSQL.runDB "postgresql://testuser:secret@localhost/testdb2" x
+  let res ← PostgreSQL.runDB (← BookExample.postgresUrl) x
   match res with
   | .error _ => IO.println "Error occured."
   | .ok val =>

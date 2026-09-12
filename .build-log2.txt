@@ -1,0 +1,78 @@
+✔ [117/132] Built SQLite:shared (182ms)
+✔ [118/132] Built Db.Backends.SQLite.Interpretation (3.7s)
+✔ [119/132] Built Db (2.4s)
+✔ [121/132] Built Db:c.o (135ms)
+✔ [122/132] Built Db.Examples.Schema (2.0s)
+✔ [123/132] Built Db.Examples.Schema:c.o (1.3s)
+✔ [124/132] Built Db.Backends.SQLite.Interpretation:c.o (7.6s)
+✔ [125/132] Built Db.Examples.Sqlite (7.3s)
+✔ [126/132] Built Db.Examples (1.2s)
+✔ [128/132] Built Db.Examples:c.o (119ms)
+✔ [129/132] Built Db.Examples.Main (1.2s)
+✔ [130/132] Built Db.Examples.Main:c.o (116ms)
+✔ [131/132] Built Db.Examples.Sqlite:c.o (9.3s)
+✔ [132/132] Built testdb:exe (12s)
+Build completed successfully (132 jobs).
+BUILD EXIT: 0
+Renamed: #[(1, urgent!)]
+Deleted: #[(2, later)]
+Tags inside the transaction: 2
+Transaction rolled back: something went wrong
+Tags after the rollback: 1
+After a failed inner transaction: #[urgent!, kept, outer]
+Tags at the end: #[urgent!, kept, outer]
+Migrating `widget.label`: varchar(50) NULL -> varchar(200) NOT NULL ...
+Rows after migration (data preserved across the rebuild):
+  id=1, label=hello, kind=X, created is set=1
+Pending operations after migration: 0
+Indexes in the database:
+  CREATE INDEX idx_note_body_nocase ON note (lower(body) ASC, id ASC)
+  CREATE INDEX idx_note_created_desc ON note (created DESC)
+  CREATE INDEX idx_note_state ON note (state ASC)
+  CREATE UNIQUE INDEX idx_note_tag_unique ON note (tag ASC)
+Pending index operations after creating them: 0
+After re-declaring it: CREATE INDEX idx_note_state ON note (archived ASC)
+Pending index operations after the change: 0
+A hand-made index survives autoUpdate: 1 (and provoked 0 operations)
+Rows stored by the ignored insert: 0
+The row is untouched: first
+Rows stored by the upserting insert: 1
+The row was overwritten: body=third, state=open (untouched, not in the set list)
+Books with their author, left-joined:
+  Best novel ever! — author age (some 74)
+  Anonymous — author age none
+Authors and their age in ten years:
+  Mike: 74 -> 84
+  Lisa: 27 -> 37
+  Nora: 41 -> 51
+SQL: SELECT left__name as "left__name", left__age as "left__age", left__retired as "left__retired", (SELECT COUNT(*) as "books" FROM ( SELECT book.title as "right__title", book.author as "right__author", book.year as "right__year" FROM book WHERE true ) WHERE (right__author) = (left__name)) as "right__books" FROM ( SELECT author.name as "left__name", author.age as "left__age", author.retired as "left__retired" FROM author WHERE true ) WHERE true
+Authors and how many books they wrote:
+  Mike: 1
+  Lisa: 2
+  Nora: 0
+Authors and the year of their latest book:
+  Mike: (some 1998)
+  Lisa: (some 2020)
+  Nora: none
+TEST EXIT: 0
+collect2: error: ld returned 1 exit status
+error: external command '/home/christian/.elan/toolchains/leanprover--lean4---v4.31.0/bin/cc' exited with code 1
+Some required targets logged failures:
+- «testdb-postgres»:exe
+error: build failed
+PGBUILD EXIT: 1
+⚠ [27/38] Replayed Db.Migration.Basic
+warning: Db/Migration/Basic.lean:47:8: declaration uses `sorry`
+warning: Db/Migration/Basic.lean:89:8: declaration uses `sorry`
+warning: Db/Migration/Basic.lean:124:4: declaration uses `sorry`
+warning: Db/Migration/Basic.lean:130:4: declaration uses `sorry`
+✖ [144/144] Building «testdb-postgres»:exe (2.3s)
+trace: .> /home/christian/.elan/toolchains/leanprover--lean4---v4.31.0/bin/cc -o /home/christian/db-integration/.lake/build/bin/testdb-postgres @/home/christian/db-integration/.lake/build/bin/testdb-postgres.rsp
+info: stderr:
+/nix/store/0ak73m7gnlzzn70shp4z620bgn7k638k-binutils-2.46/bin/ld.bfd: cannot find -lpq: No such file or directory
+collect2: error: ld returned 1 exit status
+error: external command '/home/christian/.elan/toolchains/leanprover--lean4---v4.31.0/bin/cc' exited with code 1
+Some required targets logged failures:
+- «testdb-postgres»:exe
+error: build failed
+PGTEST EXIT: 1
