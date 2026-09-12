@@ -4,6 +4,10 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Christian Merten
 -/
 import Db.Interpretation.Basic
+-- For the one statement this layer has to spell out itself: the `CREATE TABLE IF NOT EXISTS` of
+-- the tracking table, which the operation language has no word for. Everything else goes through
+-- `DBMonadWithMigrations`.
+import Db.Backends.Sql
 
 /-!
 # Declarative migrations
@@ -90,7 +94,8 @@ def renameTable (old new : String) : Step :=
 def addColumn (table column : String) (c : Column) : Step :=
   .schema (.alter table (.insert column c))
 
-/-- Drop a column, and the data in it. -/
+/-- Drop a column, and the data in it. An index over the column goes with it, and a constraint over
+it makes the step invalid; see `Step.apply`. -/
 def dropColumn (table column : String) : Step :=
   .schema (.alter table (.remove column))
 
@@ -193,10 +198,43 @@ def retargetedTable (tables : Std.HashMap String TableRecipe) (old new : String)
       foreignKeys := r.foreignKeys.map fun fk =>
         if fk.foreignTable == old then { fk with foreignTable := new } else fk }
 
+/-- Why the column `column` of `table` cannot be dropped, if it cannot: the constraint that is over
+it, or the table whose foreign key references it.
+
+A constraint is never migrated silently — the rule `autoUpdate` and
+`Db.Migration.Generate.planSteps` follow for a constraint change on an existing table — and
+dropping a column a constraint is over is a constraint change by another route. The databases
+agree: SQLite refuses the statement outright, and PostgreSQL only takes the constraint with the
+column when asked to `CASCADE`, which nothing here asks for. The way to do it is a `Step.sql` that
+drops the constraint first, or dropping and recreating the table.
+
+Indexes are deliberately not in this list; see `Step.apply`. -/
+def droppedColumnConstraint? (tables : Std.HashMap String TableRecipe) (recipe : TableRecipe)
+    (table column : String) : Option String :=
+  if recipe.primaryKey.contains column then
+    some "it is part of the primary key"
+  else if recipe.unique.any (·.contains column) then
+    some "it is part of a UNIQUE group"
+  else if recipe.foreignKeys.any (·.columns.contains column) then
+    some "a foreign key of the table is over it"
+  else
+    -- The other direction: a key in another table (or in this one) pointing at this column.
+    letI referencing :=
+      (tables.toList.filterMap fun (name, r) =>
+        if r.foreignKeys.any fun fk =>
+             fk.foreignTable == table && fk.foreignColumns.contains column then some name
+        else none).mergeSort (fun a b => decide (a ≤ b))
+    match referencing with
+    | [] => none
+    | names => some s!"the foreign key(s) of table(s) {", ".intercalate names} reference it"
+
 /-- Apply one step to the schema `s`, or say why it cannot be applied.
 
 `rawSql` and `run` are schema-neutral by assumption: a raw statement is opaque, so the only
-consistent reading is that the schema operations around it describe the whole of the change. -/
+consistent reading is that the schema operations around it describe the whole of the change.
+
+Dropping a column drops the indexes that are over it and refuses when a constraint is: see
+`droppedColumnConstraint?` for why the two are treated differently. -/
 def apply (s : DatabaseRecipe) : Step → Except String DatabaseRecipe
   | .schema (.insert name recipe) =>
     if s.tables.contains name then
@@ -227,10 +265,26 @@ def apply (s : DatabaseRecipe) : Step → Except String DatabaseRecipe
           .ok { tables :=
             s.tables.insert name { recipe with columns := recipe.columns.insert column c } }
       | .remove column =>
-        if recipe.columns.contains column then
-          .ok { tables :=
-            s.tables.insert name { recipe with columns := recipe.columns.erase column } }
-        else .error s!"cannot drop column `{name}`.`{column}`: the table has no such column"
+        if !recipe.columns.contains column then
+          .error s!"cannot drop column `{name}`.`{column}`: the table has no such column"
+        else
+          match droppedColumnConstraint? s.tables recipe name column with
+          | some reason =>
+            .error <|
+              s!"cannot drop column `{name}`.`{column}`: {reason}. A constraint change is not " ++
+              "migrated; drop the constraint by hand in a `Step.sql` step first, or drop and " ++
+              "recreate the table."
+          | none =>
+            -- The indexes over the column go with it: an index is said whole by one
+            -- `CREATE INDEX`/`DROP INDEX`, so losing a key is losing the index, and that is what
+            -- PostgreSQL does when the column is dropped. SQLite refuses such a `DROP COLUMN`
+            -- instead, which is why `planSteps` puts an explicit `dropIndex` before the
+            -- `dropColumn` — a step this then finds nothing left to do for.
+            letI dropped : TableRecipe :=
+              { recipe with
+                columns := recipe.columns.erase column
+                indexes := recipe.indexes.filter (fun idx => !idx.keys.any (·.column == column)) }
+            .ok { tables := s.tables.insert name dropped }
       | .rename old new =>
         match recipe.columns[old]? with
         | none => .error s!"cannot rename column `{name}`.`{old}`: the table has no such column"
@@ -375,20 +429,43 @@ def trackingDatabase : Database where
 
 variable {m : Type → Type} [Monad m] [DBMonadWithMigrations m]
 
+/-- The statement that creates the tracking table unless it is already there.
+
+Rendered from the same `TableRecipe` the operation language would create the table from, so that
+the table the statement makes is the table `migrate` reads through the typed API, with `IF NOT
+EXISTS` spliced in. The splice is what the operation language cannot say: `DatabaseOperation` has
+`insert` and nothing conditional, and the two backends' `execute` would each have to grow a flag
+for the one caller that needs it. Both dialects spell the clause this way. -/
+def createTrackingTableStatement (dialect : SQL.Dialect) : String :=
+  letI create :=
+    SQL.Migration.CreateTable.toString dialect
+      (SQL.Migration.CreateTable.fromRecipe trackingTable.recipe trackingTableName)
+  letI head := "CREATE TABLE "
+  if create.startsWith head then "CREATE TABLE IF NOT EXISTS " ++ create.drop head.length
+  else create
+
 open DBMonadWithMigrations in
-/-- Create the tracking table if the database does not have it yet.
+/-- Create the tracking table unless it is there already.
 
-Checked against `currentDatabase` rather than issuing a `CREATE TABLE IF NOT EXISTS`, because the
-operation language has no such operation and the introspection is there anyway. -/
-def ensureTrackingTable : m Unit := do
-  let current ← currentDatabase
-  unless current.tables.contains trackingTableName do
-    execute (.insert trackingTableName trackingTable.recipe)
+One `CREATE TABLE IF NOT EXISTS` rather than a `currentDatabase` check followed by a `CREATE
+TABLE`: the check and the creation are two statements, so two `migrate`s starting at the same time
+against the same database both see no table and both create it, and one of them fails on a table
+that already exists — after the other has begun applying migrations. The conditional statement is
+one round trip and one decision, taken by the database. -/
+def ensureTrackingTable : m Unit :=
+  rawExecute (createTrackingTableStatement (dialect (m := m)))
 
+open DBMonadWithMigrations in
 /-- The names of the migrations the database records as applied, in name order — which for the
-`NNNN_description` convention is the order they were applied in. -/
+`NNNN_description` convention is the order they were applied in.
+
+No tracking table means no migration has been applied, which is what the empty array says. It is
+deliberately not created here: a read that writes is a surprise in a `showmigrations`, it would
+turn a query against a database the caller has no `CREATE` right on into an error, and nothing
+needs it — the table is created by `migrate`, which is the thing that writes to it. -/
 def applied : m (Array String) := do
-  ensureTrackingTable
+  unless (← currentDatabase).tables.contains trackingTableName do
+    return #[]
   let rows ← DBMonad.lookup (d := trackingDatabase)
     (.orderBy [{ column := RecordIndex.name }] (.all TrackingIndex.migrations))
   return rows.map fun row => row.value .name
@@ -411,17 +488,32 @@ def Step.execute : Step → m Unit
 /-- Apply one migration and record it, without checking whether it has been applied already.
 
 An `atomic` migration runs inside a transaction, so a step that fails leaves neither a half-applied
-schema nor a record claiming the migration was applied. A migration that declares `atomic := false`
-runs step by step and writes its record after the last one, which is the only thing to do when a
-step cannot run in a transaction at all — a column type change on SQLite rebuilds the table, and
-the foreign-key pragma that needs is a no-op inside a transaction. The price is that such a
-migration can fail half way and has to be finished by hand; the record is written last so that a
-failed one is at least not reported as applied. -/
+schema nor a record claiming the migration was applied.
+
+Its record is written *first*, inside that transaction, and this is what keeps two `migrate`s
+running at the same time from applying the same migration twice. `name` is the primary key of the
+tracking table, so the second run's `INSERT` blocks on the first run's uncommitted row and then
+fails on the duplicate key when that run commits — before the second run has applied a single step
+— and its transaction takes the whole attempt back with it. The alternatives lose: recording last
+lets both runs apply every step and only then collide, and taking a lock on the tracking table for
+the duration of the run (PostgreSQL's `LOCK TABLE … IN EXCLUSIVE MODE`) serialises entire
+deployments on a table nothing else contends for, needs a transaction spanning all the migrations —
+which the SQLite rebuild rule forbids — and has no portable spelling: SQLite serialises its writers
+anyway, and gets the same protection here for free.
+
+A migration that declares `atomic := false` writes its record after its last step instead. It has
+no transaction to be taken back — that is what `atomic := false` means — so a record written first
+would survive a failure half way and claim a migration was applied that was not. Such a migration
+has to be finished by hand whichever way round the two go, and the concurrency the ordering above
+buys is not available without a transaction to buy it with. -/
 def Migration.execute [DBMonadTransactional m] (mig : Migration) (now : Int) : m Unit :=
-  letI body : m Unit := do
+  if mig.atomic then
+    DBMonadTransactional.withTransaction do
+      record mig.name now
+      mig.steps.forM Step.execute
+  else do
     mig.steps.forM Step.execute
     record mig.name now
-  if mig.atomic then DBMonadTransactional.withTransaction body else body
 
 open DBMonadWithMigrations in
 /-- The names of the migrations the database has not recorded, in list order — what `migrate` would

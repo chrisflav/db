@@ -166,7 +166,13 @@ constraints differ between the two: the operation language says column changes o
 change cannot be written as a step, and reporting it is what keeps it from being generated as a
 silent no-op. Write that one by hand as a `Step.sql`, exactly as `autoUpdate` asks for.
 
-An empty result means the declared schema and the migrations already agree. -/
+An empty result means the declared schema and the migrations already agree.
+
+The plan drops an index over a column it is about to drop *before* dropping the column, and does so
+explicitly. PostgreSQL would drop such an index with the column, but SQLite refuses a `DROP COLUMN`
+of an indexed column outright, so the statement the two backends both accept is the pair in that
+order; the fold takes the same view (`Step.apply` drops an index whose keys mention the column), so
+the explicit drop is not a second drop, it is the one that happens. -/
 -- Written with explicit `match`es rather than in `do`: `Except String` is a monad only on types in
 -- `String`'s own universe, and `List Step` is one universe up, `Step` quantifying over the monad.
 def planSteps (migrations : List Migration) (target : DatabaseRecipe) :
@@ -182,14 +188,28 @@ def planSteps (migrations : List Migration) (target : DatabaseRecipe) :
         "written in the operation language; write it by hand as a `Step.sql` step, or drop and " ++
         "recreate the tables."
     else
-      let schemaSteps := (source.operations target).toList.map Step.schema
+      let ops := source.operations target
+      -- The columns this plan drops, and the indexes of `source` that are over one of them. Those
+      -- indexes are dropped first, in the order their tables and then their definitions come, so
+      -- that the plan is the same text every time: SQLite will not drop an indexed column.
+      let dropped : Array (String × String) := ops.flatMap fun op =>
+        match op with
+        | .alter table (.remove column) => #[(table, column)]
+        | _ => #[]
+      let indexDrops : List Step :=
+        (source.tables.keys.mergeSort (fun a b => decide (a ≤ b))).flatMap fun table =>
+          ((source.tables[table]?.map (·.indexes)).getD []).filterMap fun idx =>
+            if idx.keys.any fun k => dropped.contains (table, k.column) then
+              some (Step.dropIndex table idx.name)
+            else none
+      let leadingSteps := indexDrops ++ ops.toList.map Step.schema
       -- The index operations are computed against the schema *after* the column operations, as in
       -- `autoUpdate` and for the same reason: an index on a column this migration adds cannot be
       -- created before the column exists, and a table this migration creates starts with none.
-      match Step.applyAll source schemaSteps with
+      match Step.applyAll source leadingSteps with
       | .error e => .error e
       | .ok migrated =>
-        .ok (schemaSteps ++ (migrated.declaredIndexOperations target).toList.map Step.index)
+        .ok (leadingSteps ++ (migrated.declaredIndexOperations target).toList.map Step.index)
 
 /-- Turn a migration name into the identifier the generated definition is bound to. Anything that
 is not a letter, a digit or an underscore becomes an underscore; the `migration_` prefix the caller

@@ -995,7 +995,22 @@ def migrationsDemo : Sqlite.M Unit := do
   IO.println <|
     s!"  render warns about a NOT NULL addColumn: " ++
     s!"{MigrationExample.occurs notNullPlan "atomic := false"}"
+  -- An atomic migration records itself before it runs its steps, so that a second `migrate` racing
+  -- it fails on the primary key of the tracking table instead of applying everything twice. The
+  -- record is inside the transaction, so a migration that fails still leaves nothing behind.
+  try
+    let _ ← Db.Migration.migrate
+      (MigrationExample.migrations ++ [yearAsText false, MigrationExample.failingMigration])
+      1700000900
+    IO.println "  a failing migration was accepted, which it should not be."
+  catch _ =>
+    IO.println "  the failing migration was rolled back, as expected."
+  let afterFailure ← currentDatabase
+  IO.println <|
+    s!"  recorded after the rollback: {← Db.Migration.applied (m := Sqlite.M)}, " ++
+    s!"its first step's table: {afterFailure.tables.contains "mig_never"}"
   MigrationExample.renameDemo (MigrationExample.migrations ++ [yearAsText false])
+  MigrationExample.dropColumnDemo (MigrationExample.migrations ++ [yearAsText false])
 
 /-- Exercise identifier quoting: a table whose name and columns are mixed-case and include two
 reserved words. Everything the library emits is double-quoted, so the names survive as declared and
