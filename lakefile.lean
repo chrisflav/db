@@ -58,6 +58,28 @@ target ffi_postgresql.o pkg : FilePath := do
   let weakArgs := #["-I", (← getLeanIncludeDir).toString] ++ (← libpqIncludeArgs)
   buildO oFile srcJob weakArgs #["-fPIC"] "c++" getLeanTrace
 
+/-- Whether to build the PostgreSQL backend's FFI shim and link libpq. Off by default.
+
+    Hiding the backend behind `import Db.Postgres` was not enough on its own: Lake links the
+    `extern_lib`s of every package that owns an imported module into every executable built from it,
+    and builds them first. So the shim below was compiled — needing a C++ compiler and
+    `libpq-fe.h` — for a package that only ever uses SQLite and never mentions `Db.Postgres`. A
+    target that must not be built has to be absent from the configuration, and a Lake option is the
+    only thing that can remove one; an import boundary cannot.
+
+    Turn it on with `lake build -Kpostgres=on` in this repository, or, from a dependent, with
+    `options = {postgres = "on"}` in its `[[require]]` (`lakefile.lean`:
+    ``require db from git "…" with NameMap.empty.insert `postgres "on"``).
+
+    Any value but an explicit negative counts as on, so that `-Kpostgres` and `-Kpostgres=1` mean
+    what they look like, while someone turning the backend back off with `postgres = "off"` is not
+    surprised by it staying on. -/
+def postgresEnabled : Bool :=
+  match get_config? postgres with
+  | none => false
+  | some value => !(["off", "false", "no", "0"].contains value.toLower)
+
+meta if postgresEnabled then
 extern_lib libleanffi_postgresql pkg := do
   let ffiO ← ffi_postgresql.o.fetch
   let name := nameToStaticLib "leanffi"
@@ -67,14 +89,27 @@ extern_lib libleanffi_postgresql pkg := do
 
     `Db.Postgres` is deliberately not reachable from the `Db` root module, so that a package
     depending on this one does not build the FFI shim (which needs the PostgreSQL headers) or link
-    libpq unless it asks for the backend. -/
+    libpq unless it asks for the backend.
+
+    Its root also claims every `Db.*` module that no later library claims, and that is what keeps
+    the PostgreSQL modules type-checking when `postgres` is off: they are then built as ordinary
+    `.olean`s, with nothing behind their `@[extern]` declarations. Elaborating `import Db.Postgres`
+    needs no more than that. Only an executable that actually calls into libpq needs the shim, and
+    that is exactly what the option guards. -/
 lean_lib Db
 
+-- A `meta if` must not be preceded by a doc comment: Lean reads `meta` as the declaration modifier
+-- it also is and then rejects the `if`. The doc comments therefore sit inside the guarded command.
+meta if postgresEnabled then
+/-- The Lean side of the FFI shim. It is precompiled and carries the object file, so it exists only
+    when the option is on; otherwise `lean_lib Db` builds the same modules without either. -/
 lean_lib Db.Backends.PostgreSQL.FFI where
   precompileModules := true
   moreLinkObjs := #[libleanffi_postgresql]
 
-/-- The PostgreSQL backend, and the `Db.Postgres` module that is its entry point. -/
+meta if postgresEnabled then
+/-- The PostgreSQL backend, and the `Db.Postgres` module that is its entry point. Declared only
+    when the option is on, since `needs` is what pulls the shim into a dependent's link. -/
 lean_lib Db.Postgres where
   needs := #[libleanffi_postgresql]
 
@@ -85,8 +120,11 @@ lean_lib Db.Examples
 @[test_driver] lean_exe testdb where
   root := `Db.Examples.Main
 
+meta if postgresEnabled then
 /-- The PostgreSQL half. Needs a server to talk to and libpq to link against, so it is a target of
-    its own rather than part of `lake test`. -/
+    its own rather than part of `lake test`, and it exists only under `-Kpostgres=on` — for
+    `lake exe` as much as for `lake build`, since both resolve the target out of the same
+    configuration. -/
 lean_exe «testdb-postgres» where
   root := `Db.Examples.PostgresMain
   moreLinkArgs := run_io libpqLinkArgs
