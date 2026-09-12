@@ -377,7 +377,169 @@ definition back in its own spelling rather than the one it was given — a `lowe
 The operation language describes column changes only, so a **constraint change on an existing
 table is not migrated**. Rather than applying such a migration as a silent no-op, `autoUpdate`
 aborts and names the tables whose constraints differ; migrate those by hand, or drop and recreate
-them.
+them. A declared migration can carry such a change as a raw `Step.sql` step — see below.
+
+## Migrations
+
+`autoUpdate` looks at the database in front of it and works out what to do. That is what you want
+in development and not what you want in production: what it does depends on the database it happens
+to find, so two deployments of the same code can end up with different schemas; it carries no data
+migrations; and it refuses a constraint change outright. A **migration** is the other way round —
+a named, ordered list of steps, written in Lean and committed with the code, so that the schema is
+a function of the code alone.
+
+```lean
+import Db
+
+open Db.Migration
+
+def migration0001 : Migration where
+  name := "0001_initial"
+  steps :=
+    [ .createTable "author"
+        { columns := .ofList
+            [("name", { type := .varchar 100, nullable := false }),
+             ("age", { type := .int, nullable := false })]
+          primaryKey := ["name"] },
+      .createIndex "author" { name := "idx_author_age", keys := [{ column := "age" }] } ]
+
+def migration0002 : Migration where
+  name := "0002_retired"
+  steps :=
+    [ -- A schema step, in the operation language `autoUpdate` uses.
+      .addColumn "author" "retired" { type := .bool, nullable := false,
+                                      default? := some (.bool false) },
+      -- A data step: ordinary typed code, polymorphic in the monad, so it runs on either backend.
+      .run do
+        let _ ← HasModel.update (α := Author)
+          { value | .retired => some .true | _ => none
+            condition := .gt (.var AuthorIndex.age .int) (.int 70) },
+      -- A raw statement, for what the operation language does not say.
+      .sql "UPDATE author SET retired = false WHERE name = 'Nobody'",
+      .dropIndex "author" "idx_author_age" ]
+
+def migrations : List Migration := [migration0001, migration0002]
+```
+
+The step constructors are `createTable`, `dropTable`, `renameTable`, `addColumn`, `dropColumn`,
+`renameColumn`, `alterColumn`, `createIndex`, `dropIndex`, `sql`, `sqlByDialect` and `run`. A
+`createTable` takes a `TableRecipe` and ignores its `indexes`, `CREATE TABLE` creating none; declare
+those as `createIndex` steps. A `run` step is a `{m : Type → Type} → [Monad m] →
+[DBMonadWithMigrations m] → m Unit`, which is everything `DBMonad.lookup`/`insert` and the
+`HasModel` functions need, and nothing a backend does not provide — which is what lets one migration
+be declared once and applied on both.
+
+`migrate` applies the migrations the database has not recorded, in list order, and records each:
+
+```lean
+let applied ← Db.Migration.migrate migrations now   -- `now`: Unix seconds
+```
+
+The record lives in a table `db_migrations (name text NOT NULL PRIMARY KEY, applied_at integer NOT
+NULL)`, which `migrate` creates when it is absent. It is read and written through the ordinary typed
+API, so it works on every backend without a line of backend-specific SQL. `now` is a parameter
+rather than a clock call, so that the class need not be over `IO` and a test can pin the time; the
+CLI below supplies it from `Std.Time.Timestamp.now`.
+
+`migrate` validates before it applies anything: the names have to be unique, and every name the
+database records has to appear in the list. A recorded migration the code does not declare means the
+database is ahead of the code, and applying the rest on top of a history nobody has is how a schema
+ends up in a state no code describes. `Db.Migration.applied` lists what is recorded and
+`Db.Migration.pending` what is not (by name — `Migration` is in `Type 1`, a `run` step quantifying
+over the monad, so it cannot be returned from `m`).
+
+`db_migrations` is a table like any other and schema introspection reports it, so `autoUpdate` would
+drop it as a table the target does not declare. It does not: `autoUpdate` hides the framework's own
+tables from the schema it diffs, so the two can be used in the same database — `autoUpdate` while
+developing, migrations once the schema is deployed.
+
+### `atomic`, and the SQLite rule
+
+A migration is applied inside a transaction by default, so a step that fails leaves neither a
+half-applied schema nor a record claiming the migration was applied.
+
+SQLite cannot change the type or nullability of a column in place; the backend realises such a
+change by rebuilding the table, and the rebuild has to turn off foreign-key enforcement while it
+drops the old table. `PRAGMA foreign_keys` is a no-op inside a transaction — and inside a savepoint,
+which is the same transaction as far as it is concerned — so the enforcement would stay on and the
+`DROP TABLE` would perform an implicit `DELETE` that fires the `ON DELETE` actions of every table
+referencing this one. The backend therefore refuses to rebuild inside a transaction, before it has
+done anything, and says so. A migration containing an `alterColumn` that is to be applied to SQLite
+declares
+
+```lean
+  atomic := false
+```
+
+and is then applied step by step, its record written after the last one. PostgreSQL has no such
+restriction and runs the same migration atomically.
+
+### `makemigrations`
+
+`planSteps migrations target` computes the steps that take the schema the migrations fold to over to
+`target`, the schema the code declares — typically `(%database mydb).recipe`, possibly
+`.withIndexes …`. An empty plan means there is nothing to write. `render name steps` prints the
+plan as the source of a complete Lean module:
+
+```lean
+import Db
+
+/-- Generated by `makemigrations`; edit freely. -/
+def migration_0003_pages : Db.Migration.Migration where
+  name := "0003_pages"
+  steps := [
+    .addColumn "book" "pages" { type := .int, nullable := true },
+    .dropIndex "book" "idx_book_year"
+  ]
+```
+
+What it cannot generate: a **constraint change** on an existing table, which the operation language
+has no word for — `planSteps` reports the tables whose constraints differ instead of emitting
+something that looks like a migration and does nothing; write that step by hand as a `Step.sql`.
+And it cannot see into a `sql` or `run` step: those are taken to leave the schema exactly as the
+schema steps around them describe, so a raw statement that changes the schema has to be accompanied
+by the schema step that says so.
+
+Unlike `autoUpdate`, an index the declared schema no longer names **is dropped**. `autoUpdate` runs
+against a live database that may hold indexes nobody declared and leaves those alone; here both
+sides are Lean code, so an index that disappeared from the code is a deletion like any other.
+
+A plan containing an `alterColumn` is rendered with a comment saying that it rebuilds the table on
+SQLite and may need `atomic := false`. The generator leaves `atomic` at its default rather than
+deciding: whether the rule applies depends on the backend the migration will be applied to, which is
+not something the declared schema says.
+
+### The command line
+
+`Db.Migration.Cli.main` is the four commands every project wants, over the four things every project
+has to supply:
+
+```lean
+-- Migrate.lean
+import Db
+
+def config : Db.Migration.Cli.Config Sqlite.M where
+  migrations := MyApp.migrations
+  target := (%database mydb).recipe
+  directory := "MyApp" / "Migrations"
+  run x := Sqlite.runDB "app.db" x
+
+def main (args : List String) : IO UInt32 :=
+  Db.Migration.Cli.main config args
+```
+
+| command | what it does |
+| --- | --- |
+| `migrate` | applies the migrations the database has not recorded, printing each |
+| `showmigrations` | `[X] name` for the recorded ones, `[ ] name` for the rest |
+| `makemigrations <desc>` | writes `<directory>/NNNN_<desc>.lean` and says to add it to the list |
+| `check` | exits 1 and lists the missing steps when the declaration is ahead, for CI |
+
+`migrate` prints `Nothing to migrate.` when there is nothing to do, and `makemigrations` and
+`check` print `No changes detected.` when the plan is empty. An unknown command prints the usage
+and exits 2. `NNNN` is one more than the highest leading number
+among the names the migration list already has, zero-padded to four digits, which is what makes the
+names sort in the order they were created.
 
 ## Writing
 
