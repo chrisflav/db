@@ -301,6 +301,19 @@ def Expr.ofValue {c : Column} (x : c.Value) : Expr :=
   | { type := _, nullable := .true, .. }, some x => .ofDBTypeValue x
   | { type := _, nullable := .true, .. }, none => .null
 
+/-- The conjunction of two conditions, with a `true` operand dropped.
+
+`.true` is the condition a translation that filters nothing carries, and the combinators conjoin
+the conditions of their operands as they merge them, so a plain three-way join would otherwise come
+out as `WHERE (((true) AND (true)) AND (true)) AND (...)` — noise that hides the condition the
+query actually has. Folded here rather than in `Expr.toString`, which stays a printer: it renders
+the expression it is given, and a `.and .true e` a caller built on purpose is still printed as
+written. -/
+def Expr.conj : Expr → Expr → Expr
+  | .true, e => e
+  | e, .true => e
+  | e₁, e₂ => .and e₁ e₂
+
 /-- The translation of a `Query d view`: a `FROM` with the clauses that go with it, and for every
 column of `view` the SQL expression computing it *in the scope of that `FROM`*.
 
@@ -446,12 +459,12 @@ partial def translate {d : Database} {view : View d} (q : Query d view) :
     -- `extend` or a `correlate` computed names that computation rather than an alias of the same
     -- `SELECT` list — which PostgreSQL does not have in scope in a `WHERE`.
     let c ← Expr.fromExpr t.column e
-    return { t with condition := .and t.condition c }
+    return { t with condition := Expr.conj t.condition c }
   | .join q₁ q₂ =>
     let t₁ ← (← translate q₁).joinable
     let t₂ ← (← translate q₂).joinable
     return { from_ := .crossJoin t₁.from_ t₂.from_
-             condition := .and t₁.condition t₂.condition
+             condition := Expr.conj t₁.condition t₂.condition
              column := Sum.elim t₁.column t₂.column
              ctes := t₁.ctes ++ t₂.ctes }
   | .leftJoin q₁ q₂ on =>
@@ -464,7 +477,8 @@ partial def translate {d : Database} {view : View d} (q : Query d view) :
     -- already null-extended the unmatched left rows and would then delete exactly those rows. The
     -- left-hand side's filter does belong in the `WHERE`: it selects rows of `a`, which the join
     -- keeps either way.
-    return { from_ := .join t₁.from_ t₂.from_ .leftOuter (.onCondition (.and onExpr t₂.condition))
+    return { from_ :=
+               .join t₁.from_ t₂.from_ .leftOuter (.onCondition (Expr.conj onExpr t₂.condition))
              condition := t₁.condition
              column := env
              ctes := t₁.ctes ++ t₂.ctes }
@@ -545,7 +559,7 @@ partial def translate {d : Database} {view : View d} (q : Query d view) :
     let scalar : Select :=
       { selector := .fields [(name, aggExpr)]
         from_ := s.from_
-        condition := .and s.condition onExpr
+        condition := Expr.conj s.condition onExpr
         isAggregate := true }
     return { t with
              column := Sum.elim t.column (fun _ => .scalar scalar)

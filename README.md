@@ -377,13 +377,12 @@ Sorted by depth and run, that walk generates (reformatted here; it is emitted on
 WITH RECURSIVE "ancestors" AS (
   SELECT "t1"."id" as "left__id", "t1"."parent" as "left__parent",
          "t1"."title" as "left__title", 0 as "right__depth"
-    FROM "node" AS "t1" WHERE (true) AND (("t1"."id") = (4))
+    FROM "node" AS "t1" WHERE ("t1"."id") = (4)
   UNION ALL
   SELECT "t3"."id" as "left__id", "t3"."parent" as "left__parent",
          "t3"."title" as "left__title", ("t2"."right__depth") + (1) as "right__depth"
     FROM "ancestors" AS "t2" CROSS JOIN "node" AS "t3"
-   WHERE ((true) AND (true))
-     AND ((("t3"."id") = ("t2"."left__parent")) AND (("t2"."right__depth") < (64))))
+   WHERE (("t3"."id") = ("t2"."left__parent")) AND (("t2"."right__depth") < (64)))
 SELECT "t4"."left__id" as "left__id", "t4"."left__parent" as "left__parent",
        "t4"."left__title" as "left__title", "t4"."right__depth" as "right__depth"
   FROM "ancestors" AS "t4" WHERE true ORDER BY "t4"."right__depth" ASC
@@ -844,6 +843,11 @@ a correlated subquery can name an outer column unambiguously. Only the outermost
 its output columns, and it names them exactly as the view does, which is how the backends decode
 the rows. `Query.project` generates no SQL at all: it renames and drops output columns, and only
 that outermost `SELECT` list ever sees them.
+
+Merging is also where the conditions of the operands are conjoined, and a `true` conjunct is
+dropped as the conjunction is built rather than when it is printed: a query that filters nothing
+starts from `true`, so without that a three-way join of unfiltered tables would read
+`WHERE (((true) AND (true)) AND (true)) AND (...)` and hide the condition it does have.
 
 A common table expression is the one thing that cannot stay where it was needed: `WITH` is legal
 only at the top of a statement. So a translation carries the CTEs it needs, every combinator
