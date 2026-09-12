@@ -466,6 +466,7 @@ partial def Expr.fromExpr {d : Database} {view : View d} {t : DBType}
   | .sub e₁ e₂ => return .sub (← Expr.fromExpr env e₁) (← Expr.fromExpr env e₂)
   | .mul e₁ e₂ => return .mul (← Expr.fromExpr env e₁) (← Expr.fromExpr env e₂)
   | .str s => pure (.str s.1)
+  | .text s => pure (.str s)
   | .int n => pure (.int n)
   | .null _ => pure .null
   | .var idx _ _ => pure (env idx)

@@ -506,16 +506,33 @@ def defaultsDemo : Sqlite.M Unit := do
         | .archived => some true
         | .created => some (0 : Int)
         | .tag => some none }
-  let rows ← DBMonad.lookup (Query.all (d := noteDb) .note)
-  IO.println "Notes:"
-  for row in rows do
-    letI body : String := row.value .body
-    letI tag : Option String := row.value .tag
-    letI created : Int := row.value .created
-    IO.println <|
-      s!"  id={row.value .id} body={repr body} state={row.value .state} " ++
-      s!"archived={row.value .archived} tag={repr tag} " ++
-      s!"created is set: {if 0 < created then "yes" else "no"}"
+  let printNotes (header : String) : Sqlite.M Unit := do
+    let rows ← DBMonad.lookup (Query.all (d := noteDb) .note)
+    IO.println header
+    for row in rows do
+      letI body : String := row.value .body
+      letI tag : Option String := row.value .tag
+      letI created : Int := row.value .created
+      IO.println <|
+        s!"  id={row.value .id} body={repr body} state={row.value .state} " ++
+        s!"archived={row.value .archived} tag={repr tag} " ++
+        s!"created is set: {if 0 < created then "yes" else "no"}"
+  printNotes "Notes:"
+  -- A `text` column is compared with a literal at its own type: `eq` has both operands at one
+  -- `DBType`, and `DBExpr.str` is the bounded one, at `varchar n`.
+  let urgent ← DBMonad.lookup
+    (Query.filter (.eq (.var NoteIndex.tag .text) (.text "urgent")) (Query.all (d := noteDb) .note))
+  IO.println s!"Notes tagged \"urgent\": {urgent.map fun row => (row.value NoteIndex.id : Int)}"
+  -- The same literal on the right of an `UPDATE ... SET`, for a `text` column and for a nullable
+  -- one, on the row the condition picks out.
+  let changed ← DBMonad.update (d := noteDb) (name := NoteDbIndex.note)
+    { value
+        | .body => some (.text "edited")
+        | .tag => some (.text "later")
+        | _ => none
+      condition := .eq (.var NoteIndex.id .int) (.int 2) }
+  IO.println s!"Updated {changed} note(s) with text literals."
+  printNotes "Notes after the update:"
   -- The defaults have to survive introspection, or `autoUpdate` would keep trying to fix them.
   let pending := (← currentDatabase).operations noteDb.recipe
   IO.println s!"Pending operations after creating the schema: {pending.size}"
@@ -929,6 +946,14 @@ structure Label where
   colour : VarChar 20
   deriving Repr
 
+/-- A memo, whose only content is a `String` field — an unbounded `text` column, which is what the
+`query%` DSL needs `DBExpr.text` for: a condition on it compares it with a literal at `text`. -/
+@[model (dbName := "memo") labeldb]
+structure Memo where
+  id : AutoKey
+  text : String
+  deriving Repr
+
 /-- `name` is unique, by an index declared on the recipe: `@[model]` generates no indexes, and an
 `AutoKey` would be no use here — the database assigns it, so the insert leaves it out and no row
 ever conflicts on it. -/
@@ -947,6 +972,26 @@ def modelConflictDemo : Sqlite.M Unit := do
   IO.println <|
     s!"upsert stored {rows.size} row(s), colour now " ++
     s!"{(rows[0]?.map (·.colour.val)).getD "?"}"
+  -- A `text` column in the DSL: a `String` constant is embedded as `DBExpr.text`, and `like` and
+  -- `contains` take a `text` column as readily as a `varchar n` one.
+  let hello ← HasModel.insertReturning ({ id := 0, text := "hello" } : Memo)
+  let world ← HasModel.insertReturning ({ id := 0, text := "world" } : Memo)
+  IO.println s!"Inserted memos: {hello.id}={hello.text}, {world.id}={world.text}"
+  let exact ← fetch <| query% do
+    let m ← from Memo
+    guard m.text = "hello"
+    select m
+  IO.println s!"Memos equal to \"hello\": {exact.map (·.text)}"
+  let substring ← fetch <| query% do
+    let m ← from Memo
+    guard contains m.text "ell"
+    select m
+  IO.println s!"Memos containing \"ell\": {substring.map (·.text)}"
+  let prefixed ← fetch <| query% do
+    let m ← from Memo
+    guard like m.text "h%"
+    select m
+  IO.println s!"Memos matching \"h%\": {prefixed.map (·.text)}"
 
 end ModelConflicts
 

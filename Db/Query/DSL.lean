@@ -135,13 +135,15 @@ private def mkTextLikeProof : TermElabM Expr :=
   mkEqRefl (Lean.mkConst ``Bool.true)
 
 /-- Inside a `query% do` block, `like col pattern` is SQL's `col LIKE pattern`, where `%` and `_`
-in `pattern` are wildcards. It has no meaning outside a query block. -/
-def like {n : Nat} (_col : VarChar n) (_pattern : String) : Bool := false
+in `pattern` are wildcards. The column is character data, either a `varchar n` one (a `VarChar n`
+field) or a `text` one (a `String` field); the column type is what the translation checks, which is
+why the argument here is not restricted. It has no meaning outside a query block. -/
+def like {α : Type} (_col : α) (_pattern : String) : Bool := false
 
 /-- Inside a `query% do` block, `contains col s` matches the rows whose `col` contains `s` as a
-substring, i.e. `col LIKE '%s%'` with the wildcards occurring in `s` escaped. It has no meaning
-outside a query block. -/
-def contains {n : Nat} (_col : VarChar n) (_s : String) : Bool := false
+substring, i.e. `col LIKE '%s%'` with the wildcards occurring in `s` escaped. Like `like`, it takes
+a `varchar n` or a `text` column. It has no meaning outside a query block. -/
+def contains {α : Type} (_col : α) (_s : String) : Bool := false
 
 /-- Inside a `query% do` block, `isIn col [v₁, ..., vₙ]` is SQL's `col IN (v₁, ..., vₙ)`. It has no
 meaning outside a query block. -/
@@ -248,6 +250,9 @@ private partial def transVal (ctx : Context) (e : Expr) : TermElabM (Expr × Exp
       let n := ty.appArg!
       let t := mkApp (mkConst ``DBType.varchar) n
       return (← mkAppOptM ``DBExpr.str #[some ctx.db, some ctx.view, some n, some e], t)
+    if ty.isConstOf ``String then
+      return (← mkAppOptM ``DBExpr.text #[some ctx.db, some ctx.view, some e],
+        Lean.mkConst ``DBType.text)
     if ty.isConstOf ``Int then
       return (← mkAppOptM ``DBExpr.int #[some ctx.db, some ctx.view, some e],
         Lean.mkConst ``DBType.int)

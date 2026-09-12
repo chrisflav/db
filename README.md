@@ -170,6 +170,7 @@ is translated into an SQL condition. The following are recognised:
 | `c₁ ∧ c₂`, `c₁ ∨ c₂`, `¬ c` (or `&&`, `\|\|`, `!`) | `AND`, `OR`, `NOT` |
 | `b.year.isNone`, `b.year.isSome` | `IS NULL`, `IS NOT NULL` |
 | `b.year = some 1998` | `= 1998` |
+| `b.note = "classic"` | `= 'classic'` (a `String` constant is a `text` literal, `DBExpr.text`) |
 | `like b.title "A drama%"` | `LIKE 'A drama%'`, with `\\` escaping the next character |
 | `contains b.title "100%"` | `LIKE '%100\\%%'`, with the wildcards in the needle escaped |
 | `isIn a.name [v"Mike", v"Nora"]` | `IN ('Mike', 'Nora')` |
@@ -178,8 +179,9 @@ is translated into an SQL condition. The following are recognised:
 query block. In a `like` pattern `%` and `_` are wildcards and `\` escapes the character after it,
 including itself, so a literal backslash is written `\\`; this is declared to the backend as
 `ESCAPE '\'`, since PostgreSQL and SQLite disagree on the default. `contains` does that escaping
-for you. A nullable column projects to an `Option`-valued field, so `some` is written around a
-literal it is compared with; testing for `NULL` is `isNone`, not `= none`.
+for you. Both take a character-data column, either a `varchar n` one (a `VarChar n` field) or a
+`text` one (a `String` field). A nullable column projects to an `Option`-valued field, so `some` is
+written around a literal it is compared with; testing for `NULL` is `isNone`, not `= none`.
 
 Membership in a subquery, `col IN (SELECT ...)`, is `DBExpr.inSubquery` on the core API; the
 `query%` DSL has no surface syntax for it yet.
@@ -430,7 +432,9 @@ you, the name being what a reader of the generated SQL sees.
 ## Column types and defaults
 
 `DBType` covers `bool`, `int`, `varchar n` and unbounded `text`. A model field of type `String`
-becomes a `text` column, `Option α` a nullable one.
+becomes a `text` column, `Option α` a nullable one. A comparison has both operands at one `DBType`,
+so a `text` column is compared with — and updated to — `DBExpr.text`, and a `varchar n` one
+`DBExpr.str`.
 
 A column may declare a `default?`, which the database fills in when an insert omits it:
 
