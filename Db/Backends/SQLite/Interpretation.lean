@@ -395,9 +395,22 @@ standard create/copy/drop/rename dance, run inside a transaction so it is all-or
 `DROP TABLE` also drops the table's indexes and triggers, so they are captured beforehand and
 re-created afterwards, and the `PRIMARY KEY`, the generated key, the `UNIQUE` groups and the
 foreign keys are carried over from the pragmas. A constraint naming a column the rebuild renames or
-drops cannot be carried over, so rather than dropping it silently the rebuild refuses to run. -/
+drops cannot be carried over, so rather than dropping it silently the rebuild refuses to run.
+
+A rebuild also cannot run inside an enclosing transaction, and refuses to start in one before it
+has done anything. `PRAGMA foreign_keys` is a no-op inside a transaction, so the enforcement the
+rebuild turns off would stay on, and the `DROP TABLE` below would then perform an implicit `DELETE`
+of every row, firing the `ON DELETE` actions of every table referencing this one — for a `CASCADE`,
+deleting their rows too. Wrapping the rebuild in a savepoint instead does not help: a savepoint is
+part of the same transaction, and the pragma is just as much a no-op inside it. The way out is not
+to be in a transaction at all, which for a declared migration means `atomic := false`. -/
 def rebuildTable (tableName : String) (commands : List AlterTableCommand) : M Unit := do
   let db ← read
+  if ← db.inTransaction then
+    throw <| IO.userError <|
+      s!"SQLite backend: changing the type or nullability of a column of `{tableName}` rebuilds " ++
+      "the table, which cannot be done inside a transaction (the foreign-key pragma the rebuild " ++
+      "needs is a no-op there). Declare the migration `atomic := false`."
   let current ← currentColumns tableName
   let aux ← auxiliaryObjects tableName
   let unique ← inlineUnique tableName
