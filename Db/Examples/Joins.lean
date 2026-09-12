@@ -181,6 +181,20 @@ def joinDemo (label : String) : m Unit := do
   printSorted <| (← DBMonad.lookup leftJoinOverJoin).map fun row =>
     s!"    {row.value (Sum.inl (Sum.inr BookIndex.title))} " ++
     s!"at position {row.value (Sum.inr ReadingListIndex.order)}"
+  -- A left join whose right-hand side computes a column of its own. Every right-hand column has to
+  -- come back `NULL` for a left row that finds no partner, and a computed one is no exception —
+  -- but an expression left in the join's own `SELECT` list is evaluated per row of the join, so an
+  -- unmatched row would carry its value (here `1`) rather than `NULL`. The right-hand side
+  -- therefore becomes a subquery, whose columns the join nulls out like any other's.
+  let flagged : Query (%database mydb) _ :=
+    .leftJoin (.all bookTable)
+      (.extend "onTheList" { type := .int, nullable := false } (.int 1) (.all listTable))
+      (.eq (.var (Sum.inl BookIndex.title) (.varchar 200))
+           (.var (Sum.inr (Sum.inl ReadingListIndex.bookTitle)) (.varchar 200)))
+  printAliasedSql "  left join over a computed right side" (SQL.Select.fromQuery flagged).toString
+  printSorted <| (← DBMonad.lookup flagged).map fun row =>
+    letI flag : Option Int := row.value (Sum.inr (Sum.inr ⟨⟩))
+    s!"    {row.value (Sum.inl BookIndex.title)}: on the list {flag}"
   -- The rows the reading list holds are the next demo's to create.
   let _ ← HasModel.delete (α := ReadingList) .true
 

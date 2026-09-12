@@ -39,39 +39,68 @@ abbrev ancestorView : View (%database mydb) :=
   (Table.view nodeIndex).prod (View.singleton (%database mydb) "depth" depthColumn)
 
 /--
+The step of the ancestor walk: for every row found so far, the node its `parent` names, one step
+deeper. A row whose `parent` is `NULL` matches nothing, which is how a walk that reaches a root
+stops, and the walk stops at `bound` whatever it has reached, which is what keeps a cycle among the
+`parent` references from looping forever: `UNION ALL` returns a row every time it is reached, so
+nothing else would.
+
+A definition of its own because the two walks below differ only in where they start; the CTE name
+is written into it, so a query using it has to declare its CTE under that name. That is no
+restriction: a name only has to be unique within one statement, and the two walks are two.
+
+The indices are the awkward part of writing this by hand. The step joins the rows found so far with
+the whole table, so its view is `(node × depth) × node`: `Sum.inl (Sum.inl _)` is a column of a row
+found so far, `Sum.inl (Sum.inr ⟨⟩)` is that row's depth, and `Sum.inr _` is a column of the
+candidate parent. The `extend` puts the new depth next to all of that, and the `project` brings the
+result back onto `ancestorView`, which is the view `base` and `step` have to agree on.
+-/
+def ancestorStep (bound : Int) : Query (%database mydb) ancestorView :=
+  .project
+    (View.Hom.ofMap fun i =>
+      match i with
+      | Sum.inl col => Sum.inl (Sum.inr col)
+      | Sum.inr d => Sum.inr d)
+    (.filter
+      (.and
+        (.eq (.var (Sum.inl (Sum.inr NodeIndex.id)) .int)
+             (.var (Sum.inl (Sum.inl (Sum.inl NodeIndex.parent))) .int))
+        (.lt (.var (Sum.inl (Sum.inl (Sum.inr ⟨⟩))) .int) (.int bound)))
+      (.extend "depth" depthColumn
+        (.add (.var (Sum.inl (Sum.inr ⟨⟩)) .int) (.int 1))
+        (.join (.cteRef "ancestors" ancestorView) (.all nodeIndex))))
+
+/--
 The ancestor walk: the node `start`, then its parent, then that node's parent, and so on, each row
-carrying its distance from `start`.
-
-The step stops at `bound`, which is what keeps a cycle among the `parent` references from looping
-forever: `UNION ALL` returns a row every time it is reached, so nothing else would.
-
-This is the worked example of the README, and the indices are the awkward part of writing it by
-hand. The step joins the rows found so far with the whole table, so its view is
-`(node × depth) × node`: `Sum.inl (Sum.inl _)` is a column of a row found so far,
-`Sum.inl (Sum.inr ⟨⟩)` is that row's depth, and `Sum.inr _` is a column of the candidate parent.
-The `extend` puts the new depth next to all of that, and the `project` brings the result back onto
-`ancestorView`, which is the view `base` and `step` have to agree on.
+carrying its distance from `start`. This is the worked example of the README.
 -/
 def ancestorsOf (start : Int) (bound : Int := 64) : Query (%database mydb) ancestorView :=
   .recursive "ancestors"
     -- The base: the row to start from, at depth 0.
     (.extend "depth" depthColumn (.int 0)
       (.filter (.eq (.var NodeIndex.id .int) (.int start)) (.all nodeIndex)))
-    -- The step: for every row found so far, the node its `parent` names, one step deeper. A row
-    -- whose `parent` is `NULL` matches nothing, which is how a walk that reaches a root stops.
-    (.project
-      (View.Hom.ofMap fun i =>
-        match i with
-        | Sum.inl col => Sum.inl (Sum.inr col)
-        | Sum.inr d => Sum.inr d)
-      (.filter
-        (.and
-          (.eq (.var (Sum.inl (Sum.inr NodeIndex.id)) .int)
-               (.var (Sum.inl (Sum.inl (Sum.inl NodeIndex.parent))) .int))
-          (.lt (.var (Sum.inl (Sum.inl (Sum.inr ⟨⟩))) .int) (.int bound)))
-        (.extend "depth" depthColumn
-          (.add (.var (Sum.inl (Sum.inr ⟨⟩)) .int) (.int 1))
-          (.join (.cteRef "ancestors" ancestorView) (.all nodeIndex)))))
+    (ancestorStep bound)
+
+/--
+The same walk from a base that orders and limits its rows: up from the leaf of the chain, which is
+the largest id among the nodes that have a parent and are not part of the cycle.
+
+`ORDER BY` and `LIMIT` belong to the `UNION ALL` and not to one of its branches, so such a base
+cannot stand in the compound statement as it is and becomes a subquery of its own. Written out in
+place — which is what the translator did before — SQLite rejects the statement with `LIMIT clause
+should come after UNION ALL not before` and PostgreSQL with a syntax error at the `UNION`, so this
+walk is the demo of that.
+-/
+def leafAncestors (bound : Int := 64) : Query (%database mydb) ancestorView :=
+  .recursive "ancestors"
+    (.limit 1
+      (.orderBy [{ column := Sum.inl NodeIndex.id, direction := .desc }]
+        (.extend "depth" depthColumn (.int 0)
+          (.filter
+            (.and (.isNotNull (.var NodeIndex.parent .int))
+                  (.lt (.var NodeIndex.id .int) (.int 10)))
+            (.all nodeIndex)))))
+    (ancestorStep bound)
 
 /-- The walk, sorted by depth, so that the printed rows come out in the order the walk found them
 whatever the planner did. The `WITH` is hoisted past the `ORDER BY` to the top of the statement,
@@ -141,5 +170,15 @@ def recursiveDemo (label : String) : m Unit := do
   -- The same walk, started inside the cycle. Without the bound in the step this query does not
   -- terminate at all; with it, it stops at the bound.
   reportCycleRows (← DBMonad.lookup (sortedAncestorsOf 10)).size
+  -- A base that orders and limits its rows. Those clauses belong to the `UNION ALL` rather than to
+  -- one of its branches, so the base becomes a subquery of its own; written out in place the
+  -- statement is one neither backend parses.
+  let fromLeaf := Query.orderBy [{ column := Sum.inr ⟨⟩ }] leafAncestors
+  printRecursiveSql "  ancestors of the leaf, from an ordered and limited base"
+    (SQL.Select.fromQuery fromLeaf).toString
+  for row in ← DBMonad.lookup fromLeaf do
+    IO.println <|
+      s!"    depth {row.value (Sum.inr ⟨⟩)}: " ++
+      s!"{row.value (Sum.inl NodeIndex.id)} {row.value (Sum.inl NodeIndex.title)}"
 
 end RecursiveExample

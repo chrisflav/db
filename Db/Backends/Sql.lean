@@ -376,6 +376,34 @@ what the operand asked for. -/
 def Translation.isJoinable {d : Database} {view : View d} (t : Translation view) : Bool :=
   t.isFlat && t.orderBy.isEmpty
 
+/-- Whether every output column is a bare reference to a column of `from_` rather than something
+computed from one.
+
+This is what decides whether a translation may be the right-hand operand of a left outer join as
+it stands. Such a join has to produce `NULL` in *every* right-hand column for a left row that finds
+no partner, and only a column reference does that by itself: `Query.extend` and `Query.correlate`
+leave an expression behind, and that expression is evaluated per row of the join, not per row of
+the right-hand relation. So `a ⟕ (b extended by 5)` would hand an unmatched row of `a` the value
+`5`, and `a ⟕ (b with a correlated COUNT(*))` a count of `0`, where the view — which makes every
+right-hand column nullable — says `NULL`. Wrapped in a subquery the columns become references to
+it, and the join nulls them out as it should. -/
+def Translation.readsColumns {d : Database} {view : View d} (t : Translation view) : Bool :=
+  (Enum.all view.Index).toList.all fun i =>
+    match t.column i with
+    | .column .. => Bool.true
+    | _ => Bool.false
+
+/-- Whether this translation can stand as one branch of the `UNION ALL` of a recursive common
+table expression as it stands.
+
+`ORDER BY`, `LIMIT` and `OFFSET` belong to the compound statement rather than to one of its
+branches, so a branch carrying one has to become a subquery first; written out where it stands,
+SQLite rejects it (`LIMIT clause should come after UNION ALL not before`) and PostgreSQL reports a
+syntax error at the `UNION`. A `GROUP BY` needs no wrap: a grouped select is an ordinary branch of
+a compound statement, whatever the databases then think of a recursive query that aggregates. -/
+def Translation.isUnionBranch {d : Database} {view : View d} (t : Translation view) : Bool :=
+  t.limit.isNone && t.offset.isNone && t.orderBy.isEmpty
+
 /-- `t` as a subquery, for a clause that cannot be merged into it. Its columns are then reached by
 their alias in `view` through the subquery's own alias.
 
@@ -398,6 +426,18 @@ def Translation.flatten {d : Database} {view : View d} (t : Translation view) :
 def Translation.joinable {d : Database} {view : View d} (t : Translation view) :
     StateM Nat (Translation view) :=
   if t.isJoinable then pure t else t.wrap
+
+/-- `t` wrapped if it cannot be the right-hand operand of a left outer join as it stands, and as
+it is otherwise. Beyond being a join operand at all that needs `readsColumns`, so that the join
+can null-extend every one of its columns. -/
+def Translation.nullExtendable {d : Database} {view : View d} (t : Translation view) :
+    StateM Nat (Translation view) :=
+  if t.isJoinable && t.readsColumns then pure t else t.wrap
+
+/-- `t` wrapped if it cannot be a branch of a `UNION ALL` as it stands, and as it is otherwise. -/
+def Translation.unionBranch {d : Database} {view : View d} (t : Translation view) :
+    StateM Nat (Translation view) :=
+  if t.isUnionBranch then pure t else t.wrap
 
 mutual
 
@@ -469,7 +509,9 @@ partial def translate {d : Database} {view : View d} (q : Query d view) :
              ctes := t₁.ctes ++ t₂.ctes }
   | .leftJoin q₁ q₂ on =>
     let t₁ ← (← translate q₁).joinable
-    let t₂ ← (← translate q₂).joinable
+    -- The right-hand side has to be one the join can null-extend, which is more than being a join
+    -- operand: see `Translation.readsColumns`.
+    let t₂ ← (← translate q₂).nullExtendable
     let env := Sum.elim t₁.column t₂.column
     let onExpr ← Expr.fromExpr env on
     -- The right-hand side's own filter goes into the `ON`, not into the `WHERE`:
@@ -572,8 +614,11 @@ partial def translate {d : Database} {view : View d} (q : Query d view) :
     return { from_ := .tableName name (some a)
              column := fun i => .column a (view.alias i) }
   | .recursive (view := view) name base step =>
-    let b ← translate base
-    let s ← translate step
+    -- A branch that orders, limits or offsets its rows becomes a subquery first: those clauses
+    -- belong to the compound statement and not to one of its branches, so written out where they
+    -- stand both backends reject the statement. See `Translation.isUnionBranch`.
+    let b ← (← translate base).unionBranch
+    let s ← (← translate step).unionBranch
     -- The two bodies are statements of their own, so the CTEs they need are hoisted out of them
     -- and declared next to this one rather than inside it, a `WITH` being legal only at the top of
     -- a statement. They go first, so that a CTE a body depends on is declared before it.
