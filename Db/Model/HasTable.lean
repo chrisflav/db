@@ -147,3 +147,21 @@ def deleteReturning (e : DBExpr (HasView.database α) (HasView.view α) .bool) :
   return rows.map HasView.encoding.invFun
 
 end HasModel
+
+/-- Index declarations with their columns named through a table's index type rather than as
+strings.
+
+`@[model]` generates a table with no indexes, since which of a structure's fields are worth an
+index is not something the structure says. This is how they are declared afterwards, for
+`DatabaseRecipe.withIndexes` to attach to the schema `autoUpdate` is given:
+
+```lean
+def indexedDb : DatabaseRecipe :=
+  (%database mydb).recipe.withIndexes "book" <| tableIndexes BookIndex
+    [{ name := "idx_book_author", keys := [{ column := .author }] }]
+```
+
+The index type is explicit so that `.author` resolves against it. -/
+def tableIndexes (Index : Type) [ToString Index] (indexes : List (TableIndex Index)) :
+    List (TableIndex String) :=
+  indexes.map (TableIndex.map toString)

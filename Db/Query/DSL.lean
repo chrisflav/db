@@ -46,10 +46,14 @@ syntax (name := queryBind) "let " ident " ← " "from " term : queryStmt
 syntax (name := queryGuard) "guard " term : queryStmt
 /-- Project the query onto one of the bound variables: `select x`. -/
 syntax (name := querySelect) "select " ident : queryStmt
-/-- Sort the result by a column of the selected table, e.g. `order_by b.title`. -/
-syntax (name := queryOrderBy) "order_by " term : queryStmt
+/-- How a sort key compares and where it puts its `NULL`s: `nocase` folds case, `nulls_first` and
+`nulls_last` place the nulls, and either may be left out. -/
+syntax sortModifier := &"nocase" <|> &"nulls_first" <|> &"nulls_last"
+/-- Sort the result by a column of the selected table, e.g. `order_by b.title`, optionally
+`order_by b.title nocase nulls_last`. -/
+syntax (name := queryOrderBy) "order_by " term:max (sortModifier)* : queryStmt
 /-- Sort the result by a column of the selected table, descending. -/
-syntax (name := queryOrderByDesc) "order_by_desc " term : queryStmt
+syntax (name := queryOrderByDesc) "order_by_desc " term:max (sortModifier)* : queryStmt
 /-- Keep at most `n` rows of the result, e.g. `limit 10`. -/
 syntax (name := queryLimit) "limit " num : queryStmt
 /-- Skip the first `n` rows of the result, e.g. `offset 20`. -/
@@ -267,6 +271,26 @@ private partial def withBinderFVars {α} (binders : Array QBinder) (i : Nat) (fv
   else
     k fvars
 
+/-- Read the modifiers on one `order_by`: whether it folds case, and where it puts its `NULL`s.
+Each may be given at most once, and the two null placements exclude each other. -/
+private def parseSortModifiers (ms : Array (TSyntax ``sortModifier)) :
+    TermElabM (Bool × NullsOrder) := do
+  let mut nocase := false
+  let mut nulls := NullsOrder.default
+  for m in ms do
+    match m with
+    | `(sortModifier| nocase) =>
+      if nocase then throwErrorAt m "`nocase` given twice"
+      nocase := true
+    | `(sortModifier| nulls_first) =>
+      unless nulls matches .default do throwErrorAt m "the null placement is already given"
+      nulls := .first
+    | `(sortModifier| nulls_last) =>
+      unless nulls matches .default do throwErrorAt m "the null placement is already given"
+      nulls := .last
+    | _ => throwErrorAt m "unknown sort modifier"
+  return (nocase, nulls)
+
 @[term_elab queryDo]
 def elabQueryDo : TermElab := fun stx expectedType? => do
   let `(query% do $stmts*) := stx
@@ -275,7 +299,8 @@ def elabQueryDo : TermElab := fun stx expectedType? => do
   let mut binderStx : Array (Ident × Term) := #[]
   let mut guardStx : Array Term := #[]
   let mut selectStx? : Option Ident := none
-  let mut sortStx : Array (Term × Bool) := #[]
+  -- Column, descending?, case-insensitive?, and where the nulls go.
+  let mut sortStx : Array (Term × Bool × Bool × NullsOrder) := #[]
   let mut limitStx? : Option (TSyntax `num) := none
   let mut offsetStx? : Option (TSyntax `num) := none
   for stmt in stmts do
@@ -290,10 +315,12 @@ def elabQueryDo : TermElab := fun stx expectedType? => do
         if selectStx?.isSome then
           throwErrorAt stmt "a query may contain at most one `select`"
         selectStx? := some x
-    | `(queryStmt| order_by $c:term) =>
-        sortStx := sortStx.push (c, false)
-    | `(queryStmt| order_by_desc $c:term) =>
-        sortStx := sortStx.push (c, true)
+    | `(queryStmt| order_by $c:term $ms:sortModifier*) =>
+        let (nocase, nulls) ← parseSortModifiers ms
+        sortStx := sortStx.push (c, false, nocase, nulls)
+    | `(queryStmt| order_by_desc $c:term $ms:sortModifier*) =>
+        let (nocase, nulls) ← parseSortModifiers ms
+        sortStx := sortStx.push (c, true, nocase, nulls)
     | `(queryStmt| limit $n:num) =>
         if limitStx?.isSome then
           throwErrorAt stmt "a query may contain at most one `limit`"
@@ -378,7 +405,7 @@ def elabQueryDo : TermElab := fun stx expectedType? => do
     let selView := binders[bidx]!.view
     unless sortStx.isEmpty do
       let mut keys : Array Expr := #[]
-      for (c, desc) in sortStx do
+      for (c, desc, nocase, nulls) in sortStx do
         let e ← instantiateMVars (← Term.elabTerm c none)
         Term.synthesizeSyntheticMVarsNoPostponing
         let e ← instantiateMVars e
@@ -393,8 +420,15 @@ def elabQueryDo : TermElab := fun stx expectedType? => do
             `{binders[bidx]!.name}`, the table given to `select`"
         let ctor ← columnCtor ctx kidx (Name.mkSimple e.getAppFn.constName!.getString!)
         let dir := Lean.mkConst (if desc then ``SortDirection.desc else ``SortDirection.asc)
+        let coll := Lean.mkConst
+          (if nocase then ``Collation.caseInsensitive else ``Collation.binary)
+        let nullsE := Lean.mkConst <| match nulls with
+          | .first => ``NullsOrder.first
+          | .last => ``NullsOrder.last
+          | .default => ``NullsOrder.default
         keys := keys.push
-          (← mkAppOptM ``SortKey.mk #[some db₀, some selView, some ctor, some dir])
+          (← mkAppOptM ``SortKey.mk
+            #[some db₀, some selView, some ctor, some dir, some coll, some nullsE])
       let keyList ← List.asExpr (← mkAppM ``SortKey #[selView]) keys.toList
       projQ ← mkAppM ``Query.orderBy #[keyList, projQ]
     if let some n := offsetStx? then

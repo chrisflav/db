@@ -65,12 +65,18 @@ inductive From where
   | naturalJoin (left right : From) (joinType : JoinType)
   | crossJoin (left right : From)
 
+structure OrderKey where
+  expr : Expr
+  direction : SortDirection := .asc
+  collation : Collation := .binary
+  nulls : NullsOrder := .default
+
 structure Select where
   selector : Selector
   from_ : From
   condition : Expr
   groupBy : List Expr := []
-  orderBy : List (Expr × SortDirection) := []
+  orderBy : List OrderKey := []
   limit : Option Nat := none
   offset : Option Nat := none
   /-- Whether the selector aggregates its rows. A `WHERE` cannot be merged into such a select: it
@@ -86,6 +92,18 @@ instance : Inhabited From := ⟨.tableName "" none⟩
 instance : Inhabited Select :=
   ⟨{ selector := .all, from_ := .tableName "" none, condition := .true }⟩
 
+/-- The SQL text comparing `sql` under `collation`.
+
+A case-insensitive comparison is `lower(...)` rather than a declared collation because the two
+backends have no collation in common: SQLite's is `NOCASE`, and PostgreSQL has none that is
+case-insensitive without an ICU collation being created first. `lower` is in both, means the same
+ASCII folding SQLite's `NOCASE` does, and — being an ordinary expression — is something both can
+build an index on, which is what makes an index declared this way usable by an `ORDER BY` written
+the same way. -/
+def collated : Collation → String → String
+  | .binary, sql => sql
+  | .caseInsensitive, sql => s!"lower({sql})"
+
 /-- A single-quoted SQL string literal, with embedded single quotes doubled as SQL requires. -/
 def quoteString (s : String) : String :=
   "'" ++ s.replace "'" "''" ++ "'"
@@ -93,6 +111,13 @@ def quoteString (s : String) : String :=
 def sortDirectionToString : SortDirection → String
   | .asc => "ASC"
   | .desc => "DESC"
+
+/-- Where a sort puts its `NULL`s, if it says at all. Both backends spell this the same way, and
+have since SQLite 3.30. -/
+def nullsOrderToString : NullsOrder → String
+  | .default => ""
+  | .first => " NULLS FIRST"
+  | .last => " NULLS LAST"
 
 mutual
 
@@ -162,7 +187,9 @@ partial def Select.toString (s : Select) : String :=
   letI orderBy :=
     if s.orderBy.isEmpty then ""
     else
-      letI keys := s.orderBy.map fun k => s!"{k.1.toString} {sortDirectionToString k.2}"
+      letI keys := s.orderBy.map fun k =>
+        s!"{collated k.collation k.expr.toString} {sortDirectionToString k.direction}" ++
+          nullsOrderToString k.nulls
       s!" ORDER BY {", ".intercalate keys}"
   -- SQLite rejects an `OFFSET` that is not preceded by a `LIMIT`, and PostgreSQL rejects a negative
   -- limit, so an offset without a limit is emitted with the largest limit both of them accept.
@@ -294,7 +321,9 @@ partial def Select.fromQuery {d : Database} {view : View d} (q : Query d view)
     letI s := if inner.limit.isSome || inner.offset.isSome then inner.wrap else inner
     -- The new keys go in front of the ones already there rather than replacing them, so that
     -- sorting an already sorted query breaks its ties by the earlier sort instead of losing it.
-    letI newKeys := keys.map fun k => (Expr.var s!"{emb.map k.column}", k.direction)
+    letI newKeys := keys.map fun k =>
+      ({ expr := .var s!"{emb.map k.column}", direction := k.direction, collation := k.collation,
+         nulls := k.nulls } : OrderKey)
     { s with orderBy := newKeys ++ s.orderBy }
   | .limit n q =>
     letI inner := Select.fromQuery q within emb
@@ -688,6 +717,134 @@ structure RenameTable where
 
 def RenameTable.toString (cmd : RenameTable) : String :=
   s!"ALTER TABLE {cmd.oldName} RENAME TO {cmd.newName}"
+
+/-- The SQL text of one key of an index: the column under its collation, then its direction. -/
+def indexKeyToString (key : IndexKey String) : String :=
+  s!"{collated key.collation key.column} {sortDirectionToString key.direction}"
+
+structure CreateIndex where
+  indexName : String
+  tableName : String
+  keys : List (IndexKey String)
+  unique : Bool := false
+
+/-- Both backends spell this the same way, expression keys included, so this takes no dialect. -/
+def CreateIndex.toString (cmd : CreateIndex) : String :=
+  letI keys := ", ".intercalate (cmd.keys.map indexKeyToString)
+  s!"CREATE {if cmd.unique then "UNIQUE " else ""}INDEX {cmd.indexName} ON {cmd.tableName} ({keys})"
+
+structure DropIndex where
+  indexName : String
+
+def DropIndex.toString (cmd : DropIndex) : String :=
+  s!"DROP INDEX {cmd.indexName}"
+
+/-- The statement one index operation is. -/
+def indexOperationToString : IndexOperation → String
+  | .create table index =>
+    CreateIndex.toString
+      { indexName := index.name, tableName := table, keys := index.keys, unique := index.unique }
+  | .drop _ name => DropIndex.toString { indexName := name }
+
+/-! ### Reading an index back
+
+Both backends store an index as the text of its `CREATE INDEX`, and neither reports its keys in a
+structured form an expression key survives: SQLite's `pragma_index_xinfo` gives `NULL` for the
+column of an expression key, and PostgreSQL has no per-key view at all. So the text is parsed back,
+which is tractable because the only text this has to understand is the text `CreateIndex.toString`
+produces — modulo the canonicalisation PostgreSQL applies to it when handing it back.
+
+The parsing works on `List Char` throughout: it is short, and it keeps the slice-returning string
+API out of code whose whole job is taking text apart.
+-/
+
+/-- Drop leading and trailing spaces. -/
+private def trimChars (cs : List Char) : List Char :=
+  cs.dropWhile (·.isWhitespace) |>.reverse |>.dropWhile (·.isWhitespace) |>.reverse
+
+/-- Split on commas that are not inside parentheses. -/
+private partial def splitTopLevelAux :
+    List Char → Nat → List Char → List (List Char) → List (List Char)
+  | [], _, cur, acc => (cur.reverse :: acc).reverse
+  | c :: rest, depth, cur, acc =>
+    if c == '(' then splitTopLevelAux rest (depth + 1) (c :: cur) acc
+    else if c == ')' then splitTopLevelAux rest (depth - 1) (c :: cur) acc
+    else if c == ',' && depth == 0 then splitTopLevelAux rest depth [] (cur.reverse :: acc)
+    else splitTopLevelAux rest depth (c :: cur) acc
+
+/-- The text between the last balanced pair of parentheses, which for an index DDL is its key
+list. -/
+private def lastParenGroup? (cs : List Char) : Option (List Char) := Id.run do
+  let mut close : Option Nat := none
+  for i in [0:cs.length] do
+    if cs[i]! == ')' then close := some i
+  let some closeIdx := close | return none
+  let mut depth : Nat := 0
+  for i in [0:closeIdx + 1] do
+    let j := closeIdx - i
+    if cs[j]! == ')' then depth := depth + 1
+    else if cs[j]! == '(' then
+      depth := depth - 1
+      if depth == 0 then
+        return some ((cs.drop (j + 1)).take (closeIdx - j - 1))
+  return none
+
+/-- Whether `cs` ends with `suffix`, ignoring case. -/
+private def endsWithCI (cs : List Char) (suffix : String) : Bool :=
+  letI s := suffix.toList.map Char.toLower
+  cs.length ≥ s.length && (cs.drop (cs.length - s.length)).map Char.toLower == s
+
+/-- Whether `cs` starts with `prefix'`, ignoring case. -/
+private def startsWithCI (cs : List Char) (prefix' : String) : Bool :=
+  letI s := prefix'.toList.map Char.toLower
+  cs.length ≥ s.length && (cs.take s.length).map Char.toLower == s
+
+/-- Strip what a database adds around a column reference when it reports an expression back:
+surrounding parentheses, a `::text` cast, and double quotes around the identifier. -/
+private partial def normalizeIdent (cs : List Char) : List Char :=
+  letI t := trimChars cs
+  if endsWithCI t "::text" then normalizeIdent (t.take (t.length - 6))
+  else if t.length ≥ 2 && t.head? == some '(' && t.getLast? == some ')' then
+    normalizeIdent (t.drop 1 |>.take (t.length - 2))
+  else if t.length ≥ 2 && t.head? == some '"' && t.getLast? == some '"' then
+    t.drop 1 |>.take (t.length - 2)
+  else t
+
+/-- Parse one key of an index DDL: a column or `lower(column)`, then an optional direction. -/
+private def parseIndexKey? (cs : List Char) : Option (IndexKey String) := Id.run do
+  let mut text := trimChars cs
+  let mut direction := SortDirection.asc
+  -- PostgreSQL reports the null placement the direction already implies; it says nothing extra.
+  for suffix in ["nulls first", "nulls last"] do
+    if endsWithCI text suffix then
+      text := trimChars (text.take (text.length - suffix.length))
+  if endsWithCI text "desc" then
+    direction := .desc
+    text := trimChars (text.take (text.length - 4))
+  else if endsWithCI text "asc" then
+    text := trimChars (text.take (text.length - 3))
+  if startsWithCI text "lower(" && text.getLast? == some ')' then
+    let inner := normalizeIdent (text.drop 6 |>.take (text.length - 7))
+    if inner.isEmpty then return none
+    return some
+      { column := String.ofList inner, direction := direction, collation := .caseInsensitive }
+  let column := normalizeIdent text
+  if column.isEmpty then return none
+  return some { column := String.ofList column, direction := direction, collation := .binary }
+
+/-- Parse an index back out of the `CREATE INDEX` text a backend reports for it.
+
+`name` is passed in rather than read out of the text: both backends already know it, and it is the
+one part whose spelling they disagree on (PostgreSQL quotes and schema-qualifies it). -/
+def parseCreateIndex? (name : String) (sql : String) : Option (TableIndex String) := do
+  let cs := sql.toList
+  let keys ← lastParenGroup? cs
+  let parsed := (splitTopLevelAux keys 0 [] []).filterMap parseIndexKey?
+  if parsed.isEmpty then none
+  else
+    -- Only the `UNIQUE` before `INDEX` counts; a column called `unique_something` does not.
+    let isUnique := startsWithCI (trimChars cs) "create unique index"
+    some { name := name, keys := parsed, unique := isUnique }
 
 inductive Operation where
   | dropTable : DropTable → Operation

@@ -4,3 +4,4 @@ import Db.Examples.Postgres
     name, so it is run on demand rather than by `lake test`. -/
 def main : IO Unit := do
   BookExample.test
+  BookExample.indexTest

@@ -250,6 +250,69 @@ def ForeignKey.map {α β : Type} (f : α → β) (fk : ForeignKey α) : Foreign
   onDelete := fk.onDelete
   onUpdate := fk.onUpdate
 
+/-- The direction of one `ORDER BY` key. -/
+inductive SortDirection where
+  | asc
+  | desc
+  deriving DecidableEq, Repr, BEq, Hashable
+
+/-- How character data is compared when it is ordered or indexed.
+
+`binary` compares by code point, which is what both backends do unasked. `caseInsensitive` is
+named here rather than spelled, because the two backends spell it differently: SQLite has a
+`NOCASE` collation, PostgreSQL has no case-insensitive collation by default and gets `lower(...)`
+around the value instead. Naming it keeps an `ORDER BY` and the index meant to serve it written the
+same way, which is the only way the index is any use. -/
+inductive Collation where
+  | binary
+  | caseInsensitive
+  deriving DecidableEq, Repr, BEq, Hashable
+
+/-- Where `NULL`s sort relative to ordinary values.
+
+`default` leaves it to the database, which does not agree with itself across directions, let alone
+across backends: SQLite and PostgreSQL both sort `NULL`s first ascending and last descending, so a
+query that wants them consistently at one end has to say so. -/
+inductive NullsOrder where
+  | «default»
+  | first
+  | last
+  deriving DecidableEq, Repr, BEq, Hashable
+
+/-- One key of an index: a column of the table, the direction it is stored in, and the collation it
+is compared under.
+
+The same three fields as a `SortKey`, and for the same reason: an index is only of use to an
+`ORDER BY` that asks for the order the index is in. -/
+structure IndexKey (Index : Type) where
+  column : Index
+  direction : SortDirection := .asc
+  collation : Collation := .binary
+  deriving Repr, BEq, DecidableEq, Hashable
+
+/-- An index on a table: a name, the keys it is ordered by, and whether it constrains those keys to
+be unique.
+
+The name is given rather than derived because it is what `DROP INDEX` takes, and because both
+backends require it to be unique across the whole database rather than within the table. -/
+structure TableIndex (Index : Type) where
+  name : String
+  keys : List (IndexKey Index)
+  unique : Bool := false
+  deriving Repr, BEq, DecidableEq, Hashable
+
+/-- Rename the columns of an index key along `f`. -/
+def IndexKey.map {α β : Type} (f : α → β) (k : IndexKey α) : IndexKey β where
+  column := f k.column
+  direction := k.direction
+  collation := k.collation
+
+/-- Rename the columns of an index along `f`. -/
+def TableIndex.map {α β : Type} (f : α → β) (i : TableIndex α) : TableIndex β where
+  name := i.name
+  keys := i.keys.map (IndexKey.map f)
+  unique := i.unique
+
 structure Table where
   Index : Type
   [indexing : Indexing Index]
@@ -260,12 +323,29 @@ structure Table where
   unique : List (List Index) := []
   /-- The foreign keys of the table. -/
   foreignKeys : List (ForeignKey Index) := []
+  /-- The indexes of the table.
+
+  Unlike the constraints above, a change to these *is* migrated: `CREATE INDEX` and `DROP INDEX`
+  say the whole change, where a constraint change would mean rebuilding the table. -/
+  indexes : List (TableIndex Index) := []
 
 attribute [instance] Table.indexing
 
 @[ext]
 structure Table.Entry (table : Table) : Type where
   value (idx : table.Index) : (table.columns idx).Value
+
+/-- The same table with a different set of indexes. -/
+def Table.withIndexes (t : Table) (indexes : List (TableIndex t.Index)) : Table :=
+  { t with indexes := indexes }
+
+/-- The entries of a table do not depend on its indexes: an index is a way of reaching a row, not
+part of what a row is. This is what carries a `HasTable` instance over to a table that has just
+been given indexes. -/
+def Table.entryWithIndexesEquiv (t : Table) (indexes : List (TableIndex t.Index)) :
+    t.Entry ≃ (t.withIndexes indexes).Entry where
+  toFun e := ⟨e.value⟩
+  invFun e := ⟨e.value⟩
 
 structure Database where
   Index : Type
@@ -383,19 +463,18 @@ def DBType.isTextLike : DBType → Bool
   | .text => true
   | _ => false
 
-/-- The direction of one `ORDER BY` key. -/
-inductive SortDirection where
-  | asc
-  | desc
-  deriving DecidableEq, Repr
-
-/-- One `ORDER BY` key: a column of the view, and the direction to sort it in.
+/-- One `ORDER BY` key: a column of the view, the direction to sort it in, the collation to compare
+it under, and where its `NULL`s go.
 
 Sorting is by column rather than by arbitrary expression; that is what the backends need and it
-keeps the key independent of `DBExpr`. -/
+keeps the key independent of `DBExpr`. The collation and the null placement are modifiers of the
+key rather than expressions over it for the same reason, and because an index can be declared to
+match them — see `TableIndex`. -/
 structure SortKey {d : Database} (view : View d) where
   column : view.Index
   direction : SortDirection := .asc
+  collation : Collation := .binary
+  nulls : NullsOrder := .default
 
 /-- An aggregate function of one column.
 
