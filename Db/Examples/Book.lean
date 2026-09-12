@@ -5,6 +5,7 @@ Authors: Christian Merten
 -/
 import Db.Postgres
 import Db.Examples.Schema
+import Db.Examples.Migrations
 
 /-!
 # PostgreSQL backend example
@@ -114,6 +115,36 @@ def correlateTest : IO Unit := do
     IO.println "Authors and how many books they wrote (PostgreSQL):"
     for row in ← DBMonad.lookup counted do
       IO.println s!"  {row.value (Sum.inl AuthorIndex.name)}: {row.value (Sum.inr ⟨⟩)}"
+  match ← PostgreSQL.runDB (← postgresUrl) x with
+  | .error e => IO.println s!"Error occured: {repr e}."
+  | .ok _ => pure ()
+
+/-- The declarative migrations against a real server.
+
+Worth running there and not only on SQLite: the two migrations are the same Lean value on both, so
+this is what shows that "declare once, apply anywhere" holds — the raw `UPDATE` of the second
+migration, the foreign key of the first, and the `DESC` index all have to be understood by
+PostgreSQL as well.
+
+Unlike the in-memory SQLite database, this one persists between runs and is shared with the other
+demos, so the demo drops what it created at both ends: at the start so that a re-run starts from no
+migrations applied, and at the end so that the next demo's `autoUpdate` does not find tables its
+target does not declare and drop them. -/
+def migrationsTest : IO Unit := do
+  let drop : PostgreSQL.M Unit := do
+    for table in ["mig_book", "mig_tag", "mig_author", "db_migrations"] do
+      DBMonadWithMigrations.rawExecute s!"DROP TABLE IF EXISTS {table}"
+  let x : PostgreSQL.M Unit := do
+    drop
+    MigrationExample.migrationsDemo "PostgreSQL"
+    -- A migration the database records that the code does not declare stops `migrate`.
+    MigrationExample.recordUnknownMigration
+    try
+      let _ ← Db.Migration.migrate MigrationExample.migrations 1700000002
+      IO.println "  a recorded-but-unknown migration was accepted, which it should not be."
+    catch _ =>
+      IO.println "  refused, as expected."
+    drop
   match ← PostgreSQL.runDB (← postgresUrl) x with
   | .error e => IO.println s!"Error occured: {repr e}."
   | .ok _ => pure ()

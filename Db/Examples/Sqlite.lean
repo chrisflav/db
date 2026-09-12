@@ -4,6 +4,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Christian Merten
 -/
 import Db.Examples.Schema
+import Db.Examples.Migrations
 
 /-!
 # SQLite backend example
@@ -873,6 +874,43 @@ def extendDemo : Sqlite.M Unit := do
       s!"  {row.value (Sum.inl AuthorIndex.name)}: " ++
       s!"{row.value (Sum.inl AuthorIndex.age)} -> {row.value (Sum.inr ⟨⟩)}"
 
+/-- Change `mig_book.year` from an integer to text. SQLite realises a column type change by
+rebuilding the table, which is why this exists in two versions: the atomic one cannot work there,
+and saying so is the point. -/
+def yearAsText (atomic : Bool) : Db.Migration.Migration where
+  name := "0003_year_as_text"
+  steps := [.alterColumn "mig_book" "year" { type := .varchar 10, nullable := true }]
+  atomic := atomic
+
+/-- The declarative migrations on SQLite: the shared demo, then the two refusals — a migration the
+database records and the code does not declare, and a column type change in an atomic migration. -/
+def migrationsDemo : Sqlite.M Unit := do
+  MigrationExample.migrationsDemo "SQLite"
+  -- A migration the database records that the code does not declare means the database is ahead of
+  -- the code, which `migrate` refuses to build on.
+  MigrationExample.recordUnknownMigration
+  try
+    let _ ← Db.Migration.migrate MigrationExample.migrations 1700000002
+    IO.println "  a recorded-but-unknown migration was accepted, which it should not be."
+  catch e =>
+    IO.println s!"  refused, as expected: {e}"
+  MigrationExample.forgetUnknownMigration
+  -- The SQLite rule: a column type change rebuilds the table, and a rebuild cannot happen inside a
+  -- transaction, so the atomic version has to refuse before it has done anything.
+  try
+    let _ ← Db.Migration.migrate (MigrationExample.migrations ++ [yearAsText true]) 1700000003
+    IO.println "  an atomic rebuild was accepted, which it should not be."
+  catch e =>
+    IO.println s!"  refused, as expected: {e}"
+  IO.println s!"  recorded after the refusal: {← Db.Migration.applied (m := Sqlite.M)}"
+  let applied ← Db.Migration.migrate (MigrationExample.migrations ++ [yearAsText false]) 1700000004
+  IO.println s!"  the same migration with atomic := false applied: {applied}"
+  let current ← currentDatabase
+  IO.println <|
+    s!"  mig_book.year is now " ++
+    s!"{repr ((current.tables["mig_book"]?.bind (·.columns["year"]?)).map (·.type))}"
+  IO.println s!"  rows preserved across the rebuild: {(← query "SELECT * FROM mig_book").size}"
+
 /-- Run both demos against a fresh in-memory SQLite database. -/
 def test : IO Unit := do
   Sqlite.runDB ":memory:" bookDemo
@@ -890,5 +928,6 @@ def test : IO Unit := do
 
   Sqlite.runDB ":memory:" extendDemo
   Sqlite.runDB ":memory:" correlateDemo
+  Sqlite.runDB ":memory:" migrationsDemo
 
 end SqliteExample

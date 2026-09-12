@@ -8,3 +8,4 @@ def main : IO Unit := do
   BookExample.conflictTest
   BookExample.leftJoinTest
   BookExample.correlateTest
+  BookExample.migrationsTest
