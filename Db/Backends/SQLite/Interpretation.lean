@@ -101,7 +101,7 @@ instance (d : Database) : DBMonad d M where
   lookup {view} q := do
     let sql : SQL.Select := .fromQuery q
     decodeRows view (← query sql.toString)
-  insert {table} data := do
+  insert {_table} data := do
     let db ← read
     let sql : SQL.Insert := .fromInsert data
     if let some reason := sql.sqliteError? then
@@ -112,7 +112,7 @@ instance (d : Database) : DBMonad d M where
     if let some reason := sql.sqliteError? then
       throw <| IO.userError s!"SQLite backend: {reason}"
     decodeRows (Table.view table) (← query (sql.toString .sqlite))
-  update {table} upd := do
+  update {_table} upd := do
     let db ← read
     let sql : SQL.Update := .fromUpdate upd
     -- An `UPDATE` with no assignment is not a statement; it also changes nothing.
@@ -126,7 +126,7 @@ instance (d : Database) : DBMonad d M where
     if sql.assignments.isEmpty then
       return #[]
     decodeRows (Table.view table) (← query sql.toString)
-  delete {table} del := do
+  delete {_table} del := do
     let db ← read
     let sql : SQL.Delete := .fromDelete del
     db.exec sql.toString

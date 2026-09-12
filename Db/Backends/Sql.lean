@@ -93,12 +93,23 @@ structure Select where
   would be applied before the aggregation and would refer to columns the aggregate no longer has.
   Note that an aggregation without a `GROUP BY` is still one. -/
   isAggregate : Bool := false
-  /-- Whether the selector computes a column rather than only naming one, as `Query.extend` and
-  `Query.correlate` do. A `WHERE` cannot be merged into such a select either: it would have to name
-  the alias the computed column is given in the same `SELECT` list, which SQLite allows as an
-  extension and PostgreSQL rejects outright. Wrapping the select first gives the condition a
-  subquery that really exposes the column. -/
-  computesColumns : Bool := false
+  /-- The common table expressions this statement declares, rendered as its `WITH` clause.
+
+  They belong to the statement and not to the query that needed one: `WITH` is only legal at the
+  top of a statement, so every combinator hoists the CTEs of its operands (see `Translation.ctes`)
+  and only the outermost `Select` renders them. Nothing produces a CTE yet; the field is here so
+  that recursive queries can be added without changing this shape again. -/
+  ctes : List CTE := []
+
+/-- A common table expression: `name AS (base)`, or `name AS (base UNION ALL step)` for a recursive
+one, whose `step` is evaluated over the rows found so far and reaches them by naming `name`. -/
+structure CTE where
+  name : String
+  /-- Whether `step` may name this CTE, which is what `WITH RECURSIVE` declares. -/
+  recursive : Bool := false
+  base : Select
+  /-- The recursive step, absent for a plain CTE. -/
+  step : Option Select := none
 
 end
 
@@ -107,6 +118,13 @@ instance : Inhabited Selector := ⟨.all⟩
 instance : Inhabited From := ⟨.tableName "" none⟩
 instance : Inhabited Select :=
   ⟨{ selector := .all, from_ := .tableName "" none, condition := .true }⟩
+instance : Inhabited CTE := ⟨{ name := "", base := default }⟩
+
+/-- Whether this `FROM` is itself a join, which decides whether it needs parentheses as the right
+operand of another one. -/
+def From.isJoin : From → Bool
+  | .join .. | .naturalJoin .. | .crossJoin .. => true
+  | .tableName .. | .select .. => false
 
 /-- The SQL text comparing `sql` under `collation`.
 
@@ -215,12 +233,30 @@ partial def From.toString : From → String
     s!"( {select.toString} ) AS {quoteIdent alias}"
   | .select select none =>
     s!"( {select.toString} )"
+  -- A right operand that is itself a join is parenthesised: joins associate to the left, so
+  -- `a LEFT OUTER JOIN b CROSS JOIN c ON p` reads as `(a LEFT OUTER JOIN b) CROSS JOIN c` and the
+  -- `ON` then belongs to the wrong join — a misparse where it is not outright an error. A left
+  -- operand needs no parentheses for the same reason. Both backends accept a parenthesised joined
+  -- table as an operand.
   | .join left right joinType connect =>
-    s!"{left.toString} {joinType.toString} {right.toString} {connect.toString}"
+    s!"{left.toString} {joinType.toString} {From.parenthesised right} {connect.toString}"
   | .naturalJoin left right joinType =>
-    s!"{left.toString} NATURAL {joinType.toString} {right.toString}"
+    s!"{left.toString} NATURAL {joinType.toString} {From.parenthesised right}"
   | .crossJoin left right =>
-    s!"{left.toString} CROSS JOIN {right.toString}"
+    s!"{left.toString} CROSS JOIN {From.parenthesised right}"
+
+/-- A `FROM` as it is written in the right-hand operand position of a join. -/
+partial def From.parenthesised (f : From) : String :=
+  if f.isJoin then s!"({f.toString})" else f.toString
+
+/-- `name AS (base)`, or `name AS (base UNION ALL step)` for a recursive one. The `RECURSIVE`
+keyword is not here but on the `WITH`, which is where SQL puts it. -/
+partial def CTE.toString (c : CTE) : String :=
+  letI body :=
+    match c.step with
+    | some step => s!"{c.base.toString} UNION ALL {step.toString}"
+    | none => c.base.toString
+  s!"{quoteIdent c.name} AS ({body})"
 
 partial def Select.toString (s : Select) : String :=
   letI groupBy :=
@@ -241,16 +277,17 @@ partial def Select.toString (s : Select) : String :=
     | some n, none => s!" LIMIT {n}"
     | some n, some m => s!" LIMIT {n} OFFSET {m}"
     | none, some m => s!" LIMIT 9223372036854775807 OFFSET {m}"
-  s!"SELECT {s.selector.toString} FROM {s.from_.toString} WHERE {s.condition.toString}" ++
+  -- `RECURSIVE` is declared for the whole `WITH` rather than per CTE, which is how both backends
+  -- spell it, and it is harmless on a list whose CTEs happen not to recur.
+  letI with_ :=
+    if s.ctes.isEmpty then ""
+    else
+      letI recursive := if s.ctes.any (·.recursive) then "RECURSIVE " else ""
+      s!"WITH {recursive}{", ".intercalate (s.ctes.map CTE.toString)} "
+  s!"{with_}SELECT {s.selector.toString} FROM {s.from_.toString} WHERE {s.condition.toString}" ++
     s!"{groupBy}{orderBy}{limitOffset}"
 
 end
-
-def Expr.fromName {d : Database} : d.Name → Expr
-  | .ident ident => .column s!"{ident.tableName}" s!"{ident.columnName}"
-  -- A computed name is not a column of any table; it refers to the alias the query that computed
-  -- it gave the value.
-  | .computation name _ => .var name
 
 def Expr.ofDBTypeValue {t : DBType} (x : t.Value) : Expr :=
   match t with
@@ -265,189 +302,261 @@ def Expr.ofValue {c : Column} (x : c.Value) : Expr :=
   | { type := _, nullable := .true, .. }, some x => .ofDBTypeValue x
   | { type := _, nullable := .true, .. }, none => .null
 
-/-- `s` turned into a base to hang further clauses off: a select that already limits or groups its
-rows has to become a subquery first, so that a `WHERE` or a further limit applies to the rows it
-produced rather than to the rows it was computed from. -/
-def Select.wrap (s : Select) : Select where
-  selector := .all
-  from_ := .select s none
-  condition := .true
+/-- The translation of a `Query d view`: a `FROM` with the clauses that go with it, and for every
+column of `view` the SQL expression computing it *in the scope of that `FROM`*.
 
-/-- The expression computing one output column of an aggregate query, in terms of the aliases the
-subquery holding its source rows exposes. -/
-def Expr.ofAggregateEntry {d : Database} {source : View d} : AggregateEntry source → Expr
-  | .group col => .var s!"{col}"
-  | .countAll => .aggregate "COUNT" Bool.false none
-  | .apply f col _ => .aggregate f.toString f.distinct (some (.var s!"{col}"))
+This is what makes joins flat. The alternative, which this replaces, was to materialise every
+scope as a subquery whose `SELECT` list renamed the columns to the aliases of the enclosing view,
+so that a condition could name them; every operand of a join was then a `FROM ( SELECT ... )`.
+Keeping the expressions instead means nothing has to be renamed until the very top, where
+`toSelect` names each column once, by its alias in `view`. -/
+structure Translation {d : Database} (view : View d) where
+  from_ : From
+  condition : Expr := .true
+  /-- The expression computing each output column, in the scope of `from_`. -/
+  column : view.Index → Expr
+  groupBy : List Expr := []
+  orderBy : List OrderKey := []
+  limit : Option Nat := none
+  offset : Option Nat := none
+  isAggregate : Bool := false
+  /-- The common table expressions this query needs. They are hoisted through every combinator to
+  the enclosing statement, which is the only place a `WITH` may stand. Nothing produces one yet. -/
+  ctes : List CTE := []
+
+instance {d : Database} {view : View d} : Inhabited (Translation view) :=
+  ⟨{ from_ := default, column := fun _ => default }⟩
+
+/-- The alias for the next occurrence of a table (or of a subquery) in the statement being built.
+
+Every occurrence gets one, so that a table joined with itself stays distinguishable and so that a
+correlated subquery can name an outer column unambiguously. All references go through these
+aliases, so a user table that happens to be called `t1` is no problem: it comes out as
+`"t1" AS "t3"`. -/
+def fresh : StateM Nat String := do
+  let n ← modifyGet fun n => (n, n + 1)
+  return s!"t{n + 1}"
+
+/-- The translation as a statement of its own: the columns are given their names in `view`, which
+is what the backends decode rows by. -/
+def Translation.toSelect {d : Database} {view : View d} (t : Translation view) : Select where
+  selector := .fields ((Enum.all view.Index).toList.map fun i => (view.alias i, t.column i))
+  from_ := t.from_
+  condition := t.condition
+  groupBy := t.groupBy
+  orderBy := t.orderBy
+  limit := t.limit
+  offset := t.offset
+  isAggregate := t.isAggregate
+  ctes := t.ctes
+
+/-- Whether a clause that selects rows — a `WHERE`, a `LIMIT`, an `OFFSET` — can be merged into
+this translation. It cannot once the translation limits, offsets or aggregates its rows: the
+clause would then apply to the rows the translation was computed *from* rather than to the ones it
+produced. An `ORDER BY` survives all of these, so it does not count here. -/
+def Translation.isFlat {d : Database} {view : View d} (t : Translation view) : Bool :=
+  t.limit.isNone && t.offset.isNone && !t.isAggregate && t.groupBy.isEmpty
+
+/-- Whether this translation can be an operand of a join as it stands. Beyond `isFlat` that needs
+its `ORDER BY` to be empty: the keys of a join operand would end up ordering the join, which is not
+what the operand asked for. -/
+def Translation.isJoinable {d : Database} {view : View d} (t : Translation view) : Bool :=
+  t.isFlat && t.orderBy.isEmpty
+
+/-- `t` as a subquery, for a clause that cannot be merged into it. Its columns are then reached by
+their alias in `view` through the subquery's own alias.
+
+The alias is not optional: a subquery in a `FROM` without one is a syntax error on PostgreSQL 15
+and older. The CTEs are hoisted out rather than rendered on the nested select, a `WITH` being legal
+only at the top of a statement. -/
+def Translation.wrap {d : Database} {view : View d} (t : Translation view) :
+    StateM Nat (Translation view) := do
+  let a ← fresh
+  return { from_ := .select { t.toSelect with ctes := [] } (some a)
+           column := fun i => .column a (view.alias i)
+           ctes := t.ctes }
+
+/-- `t` wrapped if it is not flat, and as it is otherwise. -/
+def Translation.flatten {d : Database} {view : View d} (t : Translation view) :
+    StateM Nat (Translation view) :=
+  if t.isFlat then pure t else t.wrap
+
+/-- `t` wrapped if it cannot be a join operand as it stands, and as it is otherwise. -/
+def Translation.joinable {d : Database} {view : View d} (t : Translation view) :
+    StateM Nat (Translation view) :=
+  if t.isJoinable then pure t else t.wrap
 
 mutual
 
-/-- Translate a typed expression into the untyped SQL AST. A column reference is printed as its
-index in the surrounding view, which is the alias `Select.fromQuery` gives it. -/
-partial def Expr.fromExpr {d : Database} {view : View d} {t : DBType} : DBExpr d view t → Expr
-  | .true => .true
-  | .false => .false
-  | .and e₁ e₂ => .and (Expr.fromExpr e₁) (Expr.fromExpr e₂)
-  | .or e₁ e₂ => .or (Expr.fromExpr e₁) (Expr.fromExpr e₂)
-  | .not e => .not (Expr.fromExpr e)
-  | .eq e₁ e₂ => .eq (Expr.fromExpr e₁) (Expr.fromExpr e₂)
-  | .ne e₁ e₂ => .ne (Expr.fromExpr e₁) (Expr.fromExpr e₂)
-  | .lt e₁ e₂ => .lt (Expr.fromExpr e₁) (Expr.fromExpr e₂)
-  | .le e₁ e₂ => .le (Expr.fromExpr e₁) (Expr.fromExpr e₂)
-  | .gt e₁ e₂ => .gt (Expr.fromExpr e₁) (Expr.fromExpr e₂)
-  | .ge e₁ e₂ => .ge (Expr.fromExpr e₁) (Expr.fromExpr e₂)
-  | .isNull e => .isNull (Expr.fromExpr e)
-  | .isNotNull e => .isNotNull (Expr.fromExpr e)
-  | .like e pattern _ => .like (Expr.fromExpr e) pattern
+/-- Translate a typed expression into the untyped SQL AST, in the environment `env` that says how
+each column of the view is computed in the scope the expression will stand in. -/
+partial def Expr.fromExpr {d : Database} {view : View d} {t : DBType}
+    (env : view.Index → Expr) : DBExpr d view t → StateM Nat Expr
+  | .true => pure .true
+  | .false => pure .false
+  | .and e₁ e₂ => return .and (← Expr.fromExpr env e₁) (← Expr.fromExpr env e₂)
+  | .or e₁ e₂ => return .or (← Expr.fromExpr env e₁) (← Expr.fromExpr env e₂)
+  | .not e => return .not (← Expr.fromExpr env e)
+  | .eq e₁ e₂ => return .eq (← Expr.fromExpr env e₁) (← Expr.fromExpr env e₂)
+  | .ne e₁ e₂ => return .ne (← Expr.fromExpr env e₁) (← Expr.fromExpr env e₂)
+  | .lt e₁ e₂ => return .lt (← Expr.fromExpr env e₁) (← Expr.fromExpr env e₂)
+  | .le e₁ e₂ => return .le (← Expr.fromExpr env e₁) (← Expr.fromExpr env e₂)
+  | .gt e₁ e₂ => return .gt (← Expr.fromExpr env e₁) (← Expr.fromExpr env e₂)
+  | .ge e₁ e₂ => return .ge (← Expr.fromExpr env e₁) (← Expr.fromExpr env e₂)
+  | .isNull e => return .isNull (← Expr.fromExpr env e)
+  | .isNotNull e => return .isNotNull (← Expr.fromExpr env e)
+  | .like e pattern _ => return .like (← Expr.fromExpr env e) pattern
   | .inList (t := t) e values =>
-    .inList (Expr.fromExpr e) (values.map (Expr.ofDBTypeValue (t := t)))
-  | .inSubquery e q col _ => .inSelect (Expr.fromExpr e) (Select.column q col)
-  | .add e₁ e₂ => .add (Expr.fromExpr e₁) (Expr.fromExpr e₂)
-  | .sub e₁ e₂ => .sub (Expr.fromExpr e₁) (Expr.fromExpr e₂)
-  | .mul e₁ e₂ => .mul (Expr.fromExpr e₁) (Expr.fromExpr e₂)
-  | .str s => .str s.1
-  | .int n => .int n
-  | .null _ => .null
-  | .var idx _ _ => .var (ToString.toString idx)
+    return .inList (← Expr.fromExpr env e) (values.map (Expr.ofDBTypeValue (t := t)))
+  | .inSubquery e q col _ => return .inSelect (← Expr.fromExpr env e) (← Select.column q col)
+  | .add e₁ e₂ => return .add (← Expr.fromExpr env e₁) (← Expr.fromExpr env e₂)
+  | .sub e₁ e₂ => return .sub (← Expr.fromExpr env e₁) (← Expr.fromExpr env e₂)
+  | .mul e₁ e₂ => return .mul (← Expr.fromExpr env e₁) (← Expr.fromExpr env e₂)
+  | .str s => pure (.str s.1)
+  | .int n => pure (.int n)
+  | .null _ => pure .null
+  | .var idx _ _ => pure (env idx)
 
 /-- The single-column `SELECT` that projects `q` onto its column `col`, as used on the right-hand
-side of an `IN`. -/
-partial def Select.column {d : Database} {view : View d} (q : Query d view) (col : view.Index) :
-    Select where
-  selector := .fields [(s!"{col}", .var s!"{col}")]
-  from_ := .select (Select.fromQuery q) none
-  condition := .true
+side of an `IN`. No nesting: every clause of `q` is kept, only the `SELECT` list is narrowed.
 
-partial def Select.fromQuery {d : Database} {view : View d} (q : Query d view)
-    (within : View d := view)
-    (emb : view.Hom within := by exact View.Hom.id _) : Select :=
+This is the one place a CTE would not be hoisted to the enclosing statement — the result is an
+`Expr`, which has nowhere to hoist to — so it renders its own `WITH`, which both backends accept
+inside a subquery expression. Nothing produces a CTE yet. -/
+partial def Select.column {d : Database} {view : View d} (q : Query d view) (col : view.Index) :
+    StateM Nat Select := do
+  let t ← translate q
+  return { t.toSelect with selector := .fields [(view.alias col, t.column col)] }
+
+/-- Translate a query into a `FROM` with its clauses and one expression per output column.
+
+Each case merges what it can into the translation it is given and wraps it in a subquery only when
+it cannot; the comments say which is which. -/
+partial def translate {d : Database} {view : View d} (q : Query d view) :
+    StateM Nat (Translation view) := do
   match q with
   | .all table =>
-    letI tableDef := d.tables table
-    { selector :=
-        .fields
-          ((Enum.all tableDef.Index).toList.map fun idx : tableDef.Index ↦
-            (s!"{emb.map idx}", .fromName <| (Table.view _).name idx))
-      from_ := .tableName (ToString.toString table) none
-      condition := .true }
+    -- Every table occurrence is aliased, so that a table joined with itself has two names.
+    let a ← fresh
+    return { from_ := .tableName (ToString.toString table) (some a)
+             column := fun i => .column a ((Table.view table).alias i) }
   | .filter e q =>
-    letI inner := Select.fromQuery q within emb
-    -- A `WHERE` merged into a select that limits or groups its rows would be applied before the
-    -- limit or the grouping rather than after it, so such a select becomes a subquery first. The
-    -- same for one whose `SELECT` list computes a column: the condition may name that column, and
-    -- an alias of the same select list is not in scope in a `WHERE` on PostgreSQL.
-    letI s :=
-      if inner.limit.isSome || inner.offset.isSome || inner.isAggregate || inner.computesColumns
-        then inner.wrap else inner
-    -- TODO: the names in the condition need to be fixed
-    { s with condition := .and s.condition (Expr.fromExpr e) }
-  | .join (s := view₁) (t := view₂) q₁ q₂ =>
-    letI s₁ : Select := Select.fromQuery q₁ (view₁.prod view₂) (View.sumInl _ _)
-    letI s₂ : Select := Select.fromQuery q₂ (view₁.prod view₂) (View.sumInr _ _)
-    { selector := .all
-      from_ := .crossJoin (.select s₁ none) (.select s₂ none)
-      condition := .true }
-  | .leftJoin (s := view₁) (t := view₂) q₁ q₂ on =>
-    -- The sides are aliased through the product of the two views as they are, not through the
-    -- product with the right-hand side nullable. The two have the same index type and so the same
-    -- alias for every column; making the right nullable changes what a row may hold, not what the
-    -- columns are called, which is all the aliasing depends on.
-    letI s₁ : Select := Select.fromQuery q₁ (view₁.prod view₂) (View.sumInl _ _)
-    letI s₂ : Select := Select.fromQuery q₂ (view₁.prod view₂) (View.sumInr _ _)
-    { selector := .all
-      from_ :=
-        .join (.select s₁ none) (.select s₂ none) .leftOuter (.onCondition (Expr.fromExpr on))
-      condition := .true }
-  | .project (s := s) (t := view) projection query =>
-    letI select : Select := Select.fromQuery query
-    { selector :=
-        .fields
-          ((Enum.all view.Index).toList.map fun idx =>
-            (s!"{emb.map idx}", .var s!"{projection.map idx}"))
-      from_ :=
-        .select select none
-      condition := .true }
-    ---- TODO: this also needs to fix the names to match the names used by the view
-    --letI select : Select := .fromQuery query within (.comp projection emb)
-    --{ selector :=
-    --    .fields
-    --      ((Enum.all view.Index).toList.map fun idx ↦ (s!"{emb.map idx}", .fromName <| view.name idx))
-    --  from_ := select.from_
-    --  condition := select.condition }
+    let t ← (← translate q).flatten
+    -- The condition is translated in the source's own environment, so a filter on a column an
+    -- `extend` or a `correlate` computed names that computation rather than an alias of the same
+    -- `SELECT` list — which PostgreSQL does not have in scope in a `WHERE`.
+    let c ← Expr.fromExpr t.column e
+    return { t with condition := .and t.condition c }
+  | .join q₁ q₂ =>
+    let t₁ ← (← translate q₁).joinable
+    let t₂ ← (← translate q₂).joinable
+    return { from_ := .crossJoin t₁.from_ t₂.from_
+             condition := .and t₁.condition t₂.condition
+             column := Sum.elim t₁.column t₂.column
+             ctes := t₁.ctes ++ t₂.ctes }
+  | .leftJoin q₁ q₂ on =>
+    let t₁ ← (← translate q₁).joinable
+    let t₂ ← (← translate q₂).joinable
+    let env := Sum.elim t₁.column t₂.column
+    let onExpr ← Expr.fromExpr env on
+    -- The right-hand side's own filter goes into the `ON`, not into the `WHERE`:
+    -- `a ⟕ σ_p(b)` is `a ⟕ b ON (on ∧ p)`, whereas a `WHERE p` would run after the join had
+    -- already null-extended the unmatched left rows and would then delete exactly those rows. The
+    -- left-hand side's filter does belong in the `WHERE`: it selects rows of `a`, which the join
+    -- keeps either way.
+    return { from_ := .join t₁.from_ t₂.from_ .leftOuter (.onCondition (.and onExpr t₂.condition))
+             condition := t₁.condition
+             column := env
+             ctes := t₁.ctes ++ t₂.ctes }
+  | .project p q =>
+    -- A projection renames and drops output columns, which only the `SELECT` list at the top ever
+    -- sees, so it generates no SQL at all: it just re-indexes the column expressions.
+    let t ← translate q
+    return { from_ := t.from_
+             condition := t.condition
+             column := fun i => t.column (p.map i)
+             groupBy := t.groupBy
+             orderBy := t.orderBy
+             limit := t.limit
+             offset := t.offset
+             isAggregate := t.isAggregate
+             ctes := t.ctes }
   | .orderBy keys q =>
-    letI inner := Select.fromQuery q within emb
+    let t ← translate q
     -- Sorting the rows a limit already selected is not the same as sorting before the limit.
-    letI s := if inner.limit.isSome || inner.offset.isSome then inner.wrap else inner
+    let t ← if t.limit.isSome || t.offset.isSome then t.wrap else pure t
     -- The new keys go in front of the ones already there rather than replacing them, so that
     -- sorting an already sorted query breaks its ties by the earlier sort instead of losing it.
-    letI newKeys := keys.map fun k =>
-      ({ expr := .var s!"{emb.map k.column}", direction := k.direction, collation := k.collation,
+    let newKeys := keys.map fun k =>
+      ({ expr := t.column k.column, direction := k.direction, collation := k.collation,
          nulls := k.nulls } : OrderKey)
-    { s with orderBy := newKeys ++ s.orderBy }
+    return { t with orderBy := newKeys ++ t.orderBy }
   | .limit n q =>
-    letI inner := Select.fromQuery q within emb
+    let t ← translate q
     -- A second limit has to apply to the rows the first one selected.
-    letI s := if inner.limit.isSome then inner.wrap else inner
-    { s with limit := some n }
+    let t ← if t.limit.isSome then t.wrap else pure t
+    return { t with limit := some n }
   | .offset n q =>
-    letI inner := Select.fromQuery q within emb
+    let t ← translate q
     -- `LIMIT n OFFSET m` skips before it takes, so an offset applied to a query that already
     -- limits its rows would be applied in the wrong order.
-    letI s := if inner.limit.isSome || inner.offset.isSome then inner.wrap else inner
-    { s with offset := some n }
-  | .extend (view := view) name _ e q =>
-    -- The source keeps its own aliases, which is what the expression's column references are
-    -- written in terms of; only the output is renamed to what the enclosing query asked for.
-    letI inner : Select := Select.fromQuery q
-    { selector :=
-        .fields <|
-          ((Enum.all view.Index).toList.map fun idx =>
-            (s!"{emb.map (Sum.inl idx)}", Expr.var (view.alias idx))) ++
-          [(s!"{emb.map (Sum.inr ⟨⟩)}", Expr.fromExpr e)]
-      from_ := .select inner none
-      condition := .true
-      computesColumns := true }
-  | .correlate (outer := outer) (inner := inner) name q sub on agg _ =>
-    -- The two sides are aliased through `outer.prod inner`, which is the view `on` is written
-    -- over: the outer rows come back as `left__*` and the subquery's as `right__*`, so the
-    -- condition's references resolve to the right one of the two scopes the scalar subquery sits
-    -- between. The outer columns keep those aliases in the `FROM`, and are renamed to the ones
-    -- this query's own view asks for on the way out.
-    letI outerSelect : Select := Select.fromQuery q (outer.prod inner) (View.sumInl _ _)
-    letI innerSelect : Select := Select.fromQuery sub (outer.prod inner) (View.sumInr _ _)
-    letI aggExpr : Expr :=
-      match agg with
-      | .group col => .var ((outer.prod inner).alias (Sum.inr col))
-      | .countAll => .aggregate "COUNT" Bool.false none
-      | .apply f col _ =>
-        .aggregate f.toString f.distinct
-          (some (.var ((outer.prod inner).alias (Sum.inr col))))
-    letI scalarSelect : Select :=
-      { selector := .fields [(name, aggExpr)]
-        from_ := .select innerSelect none
-        condition := Expr.fromExpr on
-        isAggregate := true }
-    { selector :=
-        .fields <|
-          ((Enum.all outer.Index).toList.map fun idx =>
-            (s!"{emb.map (Sum.inl idx)}",
-              Expr.var ((outer.prod inner).alias (Sum.inl idx)))) ++
-          [(s!"{emb.map (Sum.inr ⟨⟩)}", .scalar scalarSelect)]
-      from_ := .select outerSelect none
-      condition := .true
-      computesColumns := true }
+    let t ← if t.limit.isSome || t.offset.isSome then t.wrap else pure t
+    return { t with offset := some n }
   | .aggregate (out := out) a q =>
-    letI inner : Select := Select.fromQuery q
-    { selector :=
-        .fields
-          ((Enum.all out.Index).toList.map fun idx =>
-            (s!"{emb.map idx}", .ofAggregateEntry (a.entry idx)))
-      from_ := .select inner none
-      condition := .true
-      groupBy := a.groupColumns.map fun col => .var s!"{col}"
-      isAggregate := true }
+    let t ← translate q
+    -- Beyond the reasons `isFlat` gives, an inner `ORDER BY` forces the wrap too: ordering rows
+    -- before grouping them means nothing, and once the grouping were merged in, PostgreSQL would
+    -- reject the keys outright as columns that are neither grouped nor aggregated.
+    let t ← t.joinable
+    return { from_ := t.from_
+             -- The filter of the source runs before the grouping, which is what filtering the
+             -- rows an aggregate aggregates means.
+             condition := t.condition
+             column := fun i =>
+               match a.entry i with
+               | .group c => t.column c
+               | .countAll => .aggregate "COUNT" Bool.false none
+               | .apply f c _ => .aggregate f.toString f.distinct (some (t.column c))
+             groupBy := a.groupColumns.map t.column
+             isAggregate := true
+             ctes := t.ctes }
+  | .extend name _ e q =>
+    -- A computed column never needs a wrap: it changes no row set, and an expression over the
+    -- source's column expressions is a legal `SELECT` list entry wherever they are — over an
+    -- aggregate select list included, where it becomes an expression over the aggregates.
+    let t ← translate q
+    let value ← Expr.fromExpr t.column e
+    return { t with column := Sum.elim t.column (fun _ => value) }
+  | .correlate name q sub on agg _ =>
+    -- A scalar subquery correlated with a row of an aggregate is not a thing: the outer row is a
+    -- group, and the condition would name columns the grouping no longer has.
+    let t ← translate q
+    let t ← if t.isAggregate || !t.groupBy.isEmpty then t.wrap else pure t
+    let s ← (← translate sub).joinable
+    -- The outer columns are `"t1"."name"` references, and are in scope inside the scalar subquery
+    -- because every alias in the statement is distinct — which is what makes the correlation work
+    -- without either side being renamed.
+    let onExpr ← Expr.fromExpr (Sum.elim t.column s.column) on
+    let aggExpr : Expr :=
+      match agg with
+      | .group col => s.column col
+      | .countAll => .aggregate "COUNT" Bool.false none
+      | .apply f col _ => .aggregate f.toString f.distinct (some (s.column col))
+    let scalar : Select :=
+      { selector := .fields [(name, aggExpr)]
+        from_ := s.from_
+        condition := .and s.condition onExpr
+        isAggregate := true }
+    return { t with
+             column := Sum.elim t.column (fun _ => .scalar scalar)
+             ctes := t.ctes ++ s.ctes }
 
 end
+
+/-- The `SELECT` statement computing `q`: the translation of `q`, with its columns named by their
+aliases in `view`, which is what the backends decode rows by. -/
+def Select.fromQuery {d : Database} {view : View d} (q : Query d view) : Select :=
+  ((translate q).run' 0).toSelect
 
 def interpretation : Interpretation Select where
   fromQuery _ := Select.fromQuery
@@ -573,13 +682,27 @@ def Update.toString (upd : Update) : String :=
   s!"UPDATE {quoteQualified upd.table} SET {sets} WHERE {upd.condition.toString}" ++
     returningClause upd.returning
 
-def Update.fromUpdate {d : Database} {tableName : d.Index} (upd : d.Update tableName) : Update where
-  table := ToString.toString tableName
-  assignments :=
-    (Enum.all (d.tables tableName).Index).toList.filterMap
-      fun colName =>
-        (upd.value colName).map (fun e => (ToString.toString colName, Expr.fromExpr e))
-  condition := .fromExpr upd.condition
+/-- The environment a statement that writes one table translates its expressions in: a column is
+the bare, unqualified name the table declares. An `UPDATE` or a `DELETE` names exactly one table
+and gives it no alias, so there is nothing to qualify the name with. -/
+def tableEnv {d : Database} (tableName : d.Index) : (Table.view tableName).Index → Expr :=
+  fun i => .var ((Table.view tableName).alias i)
+
+def Update.fromUpdate {d : Database} {tableName : d.Index} (upd : d.Update tableName) : Update :=
+  -- One alias counter for the whole statement, so that two assignments that each contain a
+  -- subquery do not both call their table `t1`.
+  let go : StateM Nat Update := do
+    let env := tableEnv tableName
+    let assignments ← (Enum.all (d.tables tableName).Index).toList.foldlM
+      (fun (acc : Array (String × Expr)) colName =>
+        match upd.value colName with
+        | some e => return acc.push (ToString.toString colName, ← Expr.fromExpr env e)
+        | none => pure acc)
+      #[]
+    return { table := ToString.toString tableName
+             assignments := assignments.toList
+             condition := ← Expr.fromExpr env upd.condition }
+  go.run' 0
 
 /-- A `DELETE` statement targeting a single table. -/
 structure Delete where
@@ -595,7 +718,7 @@ def Delete.toString (del : Delete) : String :=
 def Delete.fromDelete {d : Database} {tableName : d.Index} (del : d.Delete tableName) :
     Delete where
   fromTable := ToString.toString tableName
-  condition := .fromExpr del.condition
+  condition := (Expr.fromExpr (tableEnv tableName) del.condition).run' 0
 
 def DBType.toString : DBType → String
   | .int => "integer"
