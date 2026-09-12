@@ -94,6 +94,24 @@ suite can be pointed at another server or database, and the local test database 
 def postgresUrl : IO String := do
   return (← IO.getEnv "DB_POSTGRES_URL").getD "postgresql://testuser:secret@localhost/testdb2"
 
+/-- Print a statement's SQL and check that it contains no subquery.
+
+The shape of the SQL is the substance of the join demos, and a reader of a printed statement does
+not necessarily notice a subquery that crept back into it, so the demo asserts it rather than only
+showing it. The two spellings are the two the renderer can produce: `( SELECT` for a subquery in a
+`FROM`, `(SELECT` for one used as a value. -/
+def printFlatSql (label : String) (sql : String) : IO Unit := do
+  IO.println s!"{label}: {sql}"
+  if (sql.splitOn "( SELECT").length != 1 || (sql.splitOn "(SELECT").length != 1 then
+    throw <| IO.userError s!"the SQL for `{label}` was expected to be flat, but nests a subquery"
+
+/-- Print a statement's SQL and check that the subquery in it carries an alias, which PostgreSQL 15
+and older require of any subquery in a `FROM`. -/
+def printAliasedSql (label : String) (sql : String) : IO Unit := do
+  IO.println s!"{label}: {sql}"
+  if (sql.splitOn ") AS \"t").length == 1 then
+    throw <| IO.userError s!"the subquery in `{label}` has no alias"
+
 open HasModel DBMonadWithMigrations
 
 def mike : Author where

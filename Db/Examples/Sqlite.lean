@@ -5,6 +5,7 @@ Authors: Christian Merten
 -/
 import Db.Examples.Schema
 import Db.Examples.Migrations
+import Db.Examples.Joins
 
 /-!
 # SQLite backend example
@@ -903,9 +904,10 @@ def extendDemo : Sqlite.M Unit := do
     IO.println <|
       s!"  {row.value (Sum.inl AuthorIndex.name)}: " ++
       s!"{row.value (Sum.inl AuthorIndex.age)} -> {row.value (Sum.inr ⟨⟩)}"
-  -- Filtering on the computed column. It has to be filtered from outside the select that computes
-  -- it: the condition names the alias, and an alias of the same `SELECT` list is in scope in a
-  -- `WHERE` on SQLite but not on PostgreSQL. The extra subquery in the SQL is that.
+  -- Filtering on the computed column. The condition cannot name the alias the column is given:
+  -- an alias of the same `SELECT` list is in scope in a `WHERE` on SQLite but not on PostgreSQL.
+  -- The translation substitutes the expression the column is computed from into the condition
+  -- instead, which is why the SQL below has no subquery and repeats the arithmetic.
   let over50 : Query (%database mydb) _ :=
     .filter (.gt (.var (Sum.inr (⟨⟩ : IUnit "age_in_10")) .int) (.int 50)) inTenYears
   IO.println s!"SQL: {(SQL.Select.fromQuery over50).toString}"
@@ -1045,6 +1047,7 @@ def test : IO Unit := do
   Sqlite.runDB ":memory:" indexDemo
   Sqlite.runDB ":memory:" conflictDemo
   Sqlite.runDB ":memory:" leftJoinDemo
+  Sqlite.runDB ":memory:" (JoinExample.joinDemo "SQLite")
   Sqlite.runDB ":memory:" extendDemo
   Sqlite.runDB ":memory:" correlateDemo
   Sqlite.runDB ":memory:" modelConflictDemo

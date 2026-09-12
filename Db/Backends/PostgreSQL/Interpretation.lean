@@ -90,13 +90,13 @@ instance (d : Database) : DBMonad d M where
   lookup {view} q := do
     let sql : SQL.Select := .fromQuery q
     decodeRows view (← rowsOf sql.toString)
-  insert {table} data := do
+  insert {_table} data := do
     let sql : SQL.Insert := .fromInsert data
     _ ← execCounting (sql.toString .postgres)
   insertReturning {table} data := do
     let sql : SQL.Insert := { SQL.Insert.fromInsert data with returning := SQL.columnNames table }
     decodeRows (Table.view table) (← rowsOf (sql.toString .postgres))
-  update {table} upd := do
+  update {_table} upd := do
     let sql : SQL.Update := .fromUpdate upd
     -- An `UPDATE` with no assignment is not a statement; it also changes nothing.
     if sql.assignments.isEmpty then
@@ -107,7 +107,7 @@ instance (d : Database) : DBMonad d M where
     if sql.assignments.isEmpty then
       return #[]
     decodeRows (Table.view table) (← rowsOf sql.toString)
-  delete {table} del := do
+  delete {_table} del := do
     let sql : SQL.Delete := .fromDelete del
     execCounting sql.toString
   deleteReturning {table} del := do

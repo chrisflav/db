@@ -203,6 +203,14 @@ nullable, so `row.value (Sum.inr AuthorIndex.age)` is an `Option Int` even thoug
 `NOT NULL`, and is `none` for a book whose author has no row. Like `inSubquery`, this is core API
 that the `query%` DSL has no surface syntax for yet.
 
+Joins nest, in either direction: `(a × b) × c` and `a × (b × c)` are both cross products of three
+tables, and their columns are named accordingly (`left__left__title`, `right__right__order`). A
+`leftJoin` over a join is a join too. Filtering the *right-hand side* of a left join is not the
+same as filtering the join — `a ⟕ σ_p(b)` keeps the left rows that `p` rejects, with `NULL`s —
+and the translation says so by putting that filter into the `ON` rather than into the `WHERE`.
+
+All of this comes out as one flat statement: see [Design](#design) below.
+
 ## Ordering, paging and aggregates
 
 A `query% do` block can sort and page its result:
@@ -713,3 +721,17 @@ To connect an arbitrary type `α` to the language of `Database`, `Table` and `Co
 there is the `Model` structure, bundling a table `t` and an equivalence of the entries of `t`
 with `α`. The `@[model]` tag then automatically generates the required table and connection from
 a `structure` and registers it as a table in the relevant database.
+
+### How a query becomes SQL
+
+A `Query` is translated to a `FROM` clause together with, for each column of its view, the SQL
+expression that computes that column in the scope of that `FROM`. Joins are therefore flat —
+`FROM "author" AS "t1" CROSS JOIN "book" AS "t2"`, not a subquery per operand — and a query only
+becomes a subquery where a clause cannot be merged into it, for instance a `WHERE` over a query
+that already limits or groups its rows. Such a subquery always carries an alias, which is what
+PostgreSQL 15 and older require and which the generated SQL therefore now satisfies. Every table
+occurrence is aliased too (`t1`, `t2`, …), so a table joined with itself stays distinguishable and
+a correlated subquery can name an outer column unambiguously. Only the outermost statement names
+its output columns, and it names them exactly as the view does, which is how the backends decode
+the rows. `Query.project` generates no SQL at all: it renames and drops output columns, and only
+that outermost `SELECT` list ever sees them.

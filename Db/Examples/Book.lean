@@ -6,6 +6,7 @@ Authors: Christian Merten
 import Db.Postgres
 import Db.Examples.Schema
 import Db.Examples.Migrations
+import Db.Examples.Joins
 
 /-!
 # PostgreSQL backend example
@@ -119,10 +120,19 @@ def correlateTest : IO Unit := do
   | .error e => IO.println s!"Error occured: {repr e}."
   | .ok _ => pure ()
 
+/-- The join demos against a real server. The SQL is the same on both backends, so what this adds
+over the SQLite run is that PostgreSQL accepts it — it is the stricter of the two about a subquery
+in a `FROM` needing an alias, and about the parenthesisation of a nested join. -/
+def joinTest : IO Unit := do
+  match ← PostgreSQL.runDB (← postgresUrl) (JoinExample.joinDemo "PostgreSQL") with
+  | .error e => IO.println s!"Error occured: {repr e}."
+  | .ok _ => pure ()
+
 /-- A computed column, filtered on. PostgreSQL is the backend that has anything to say here: a
 `WHERE` naming an alias of its own `SELECT` list is an SQLite extension and a plain error on
-PostgreSQL, so the condition has to be applied to a select that already exposes the computed
-column. -/
+PostgreSQL. The translation avoids the question by substituting the expression the column is
+computed from into the condition, so the filter needs no subquery at all; this is what checks that
+PostgreSQL really accepts the result. -/
 def extendTest : IO Unit := do
   let x : PostgreSQL.M Unit := do
     autoUpdate (%database mydb)
