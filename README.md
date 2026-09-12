@@ -210,7 +210,10 @@ Joins nest, in either direction: `(a × b) × c` and `a × (b × c)` are both cr
 tables, and their columns are named accordingly (`left__left__title`, `right__right__order`). A
 `leftJoin` over a join is a join too. Filtering the *right-hand side* of a left join is not the
 same as filtering the join — `a ⟕ σ_p(b)` keeps the left rows that `p` rejects, with `NULL`s —
-and the translation says so by putting that filter into the `ON` rather than into the `WHERE`.
+and the translation says so by putting that filter into the `ON` rather than into the `WHERE`. A
+right-hand side that *computes* a column, with `extend` or `correlate`, becomes a subquery instead:
+a left row that matches nothing has to come back with `NULL` in that column too, and an expression
+in the join's own `SELECT` list would be evaluated per row of the join and hand it a value.
 
 All of this comes out as one flat statement: see [Design](#design) below.
 
@@ -341,25 +344,28 @@ abbrev depthColumn : Column := { type := .int, nullable := false }
 abbrev ancestorView : View mydb :=
   (Table.view nodeIndex).prod (View.singleton mydb "depth" depthColumn)
 
+-- The step: for every row found so far, the node its `parent` names, one step deeper.
+def ancestorStep (bound : Int) : Query mydb ancestorView :=
+  .project
+    (View.Hom.ofMap fun i =>
+      match i with
+      | Sum.inl col => Sum.inl (Sum.inr col)
+      | Sum.inr d => Sum.inr d)
+    (.filter
+      (.and
+        (.eq (.var (Sum.inl (Sum.inr NodeIndex.id)) .int)
+             (.var (Sum.inl (Sum.inl (Sum.inl NodeIndex.parent))) .int))
+        (.lt (.var (Sum.inl (Sum.inl (Sum.inr ⟨⟩))) .int) (.int bound)))
+      (.extend "depth" depthColumn
+        (.add (.var (Sum.inl (Sum.inr ⟨⟩)) .int) (.int 1))
+        (.join (.cteRef "ancestors" ancestorView) (.all nodeIndex))))
+
 def ancestorsOf (start : Int) (bound : Int := 64) : Query mydb ancestorView :=
   .recursive "ancestors"
     -- The base: the row to start from, at depth 0.
     (.extend "depth" depthColumn (.int 0)
       (.filter (.eq (.var NodeIndex.id .int) (.int start)) (.all nodeIndex)))
-    -- The step: for every row found so far, the node its `parent` names, one step deeper.
-    (.project
-      (View.Hom.ofMap fun i =>
-        match i with
-        | Sum.inl col => Sum.inl (Sum.inr col)
-        | Sum.inr d => Sum.inr d)
-      (.filter
-        (.and
-          (.eq (.var (Sum.inl (Sum.inr NodeIndex.id)) .int)
-               (.var (Sum.inl (Sum.inl (Sum.inl NodeIndex.parent))) .int))
-          (.lt (.var (Sum.inl (Sum.inl (Sum.inr ⟨⟩))) .int) (.int bound)))
-        (.extend "depth" depthColumn
-          (.add (.var (Sum.inl (Sum.inr ⟨⟩)) .int) (.int 1))
-          (.join (.cteRef "ancestors" ancestorView) (.all nodeIndex)))))
+    (ancestorStep bound)
 ```
 
 The step joins the rows found so far with the whole table, so it is written over
@@ -398,12 +404,20 @@ Three restrictions come with this:
 - **The step may name the CTE exactly once, and not inside a subquery.** That is SQLite's rule; it
   rejects the other shape with `circular reference: ancestors`. A step built out of
   `join`/`filter`/`extend`/`project`, like the one above, satisfies it, because those translate to
-  one flat `SELECT`. A step that aggregates, limits or orders forces a subquery around the part it
-  applies to and will fail on SQLite.
-- **The column types of `base` and `step` must agree per position**, and PostgreSQL is strict about
-  it. An `int` literal `0` against `depth + 1` is fine; a `DBExpr.str` against a `varchar(n)`
-  column is not — take the value from a column of the right type, or write the literal at that
-  type.
+  one flat `SELECT`. A step that orders or limits its rows does not: those clauses belong to the
+  `UNION ALL` and not to one of its branches, so the step becomes a subquery around the
+  self-reference. Nor will either backend run a step that aggregates — SQLite calls it a
+  `recursive aggregate query`, PostgreSQL says aggregate functions are not allowed in a recursive
+  query's recursive term. A `base` that orders or limits is fine: it becomes a subquery too, and
+  there is no self-reference in it to object to.
+- **The column types of `base` and `step` must agree per position.** PostgreSQL takes the type of
+  every column of the CTE from the non-recursive term and insists the other branch agree. An `int`
+  literal `0` against `depth + 1` is fine. A `DBExpr.str` against a `varchar(n)` column is not, in
+  either direction: the literal is emitted as a bare `'...'`, which PostgreSQL types as `text`, and
+  it reports `recursive query "ancestors" column 3 has type text in non-recursive term but type
+  character varying overall`. There is no cast to write it with, so take the value from a column of
+  the right type on both sides — which is what the walk above does with `title`. SQLite, which does
+  not type a column this way, runs it either way.
 - **`UNION ALL`, so a cycle has to be cut by the step.** A row reached twice is returned twice, and
   a cycle among the `parent` references would be walked forever; the `depth < bound` conjunct above
   is what stops it. Started inside a two-node cycle, the query above returns 65 rows — the starting
@@ -856,13 +870,15 @@ A `Query` is translated to a `FROM` clause together with, for each column of its
 expression that computes that column in the scope of that `FROM`. Joins are therefore flat —
 `FROM "author" AS "t1" CROSS JOIN "book" AS "t2"`, not a subquery per operand — and a query only
 becomes a subquery where a clause cannot be merged into it, for instance a `WHERE` over a query
-that already limits or groups its rows. Such a subquery always carries an alias, which is what
-PostgreSQL 15 and older require and which the generated SQL therefore now satisfies. Every table
-occurrence is aliased too (`t1`, `t2`, …), so a table joined with itself stays distinguishable and
-a correlated subquery can name an outer column unambiguously. Only the outermost statement names
-its output columns, and it names them exactly as the view does, which is how the backends decode
-the rows. `Query.project` generates no SQL at all: it renames and drops output columns, and only
-that outermost `SELECT` list ever sees them.
+that already limits or groups its rows, a right-hand join operand whose columns the join has to be
+able to null out, or a branch of a `UNION ALL` that orders or limits its rows — those clauses
+belong to the compound statement and not to a branch of it. Such a subquery always carries an
+alias, which is what PostgreSQL 15 and older require and which the generated SQL therefore now
+satisfies. Every table occurrence is aliased too (`t1`, `t2`, …), so a table joined with itself
+stays distinguishable and a correlated subquery can name an outer column unambiguously. Only the
+outermost statement names its output columns, and it names them exactly as the view does, which is
+how the backends decode the rows. `Query.project` generates no SQL at all: it renames and drops
+output columns, and only that outermost `SELECT` list ever sees them.
 
 Merging is also where the conditions of the operands are conjoined, and a `true` conjunct is
 dropped as the conjunction is built rather than when it is printed: a query that filters nothing
