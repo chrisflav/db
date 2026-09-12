@@ -308,6 +308,17 @@ instance : DBMonadWithMigrations M where
   abort message := do
     IO.println s!"PostgreSQL backend: {message}"
     throw <| .migrationError message
+  dialect := .postgres
+  rawExecute statement := do
+    let conn := (← get).connection
+    match ← conn.exec statement with
+    | .failure err =>
+      IO.println s!"Error {repr err}"
+      throw .fatal
+    -- Rows are not an error here, unlike in `execute`: a raw step is whatever statement the author
+    -- of the migration wrote, and one that returns rows is a legitimate thing to run and have
+    -- nothing to do with the result.
+    | .data _ | .success _ => pure ()
   execute operation := do
     let conn := (← get).connection
     let sql : SQL.Migration.Operation := .fromDatabaseOperation operation

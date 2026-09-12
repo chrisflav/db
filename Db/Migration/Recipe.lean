@@ -307,6 +307,59 @@ def DatabaseRecipe.indexOperations (source target : DatabaseRecipe) : Array Inde
         | none => res := res.push (.create name idx)
     return res
 
+/-- The index operations that bring `source` to `target` when `source` is itself declared rather
+than introspected.
+
+This is the strict counterpart of `indexOperations`. That one leaves an index whose name the target
+does not mention alone, because it runs against a live database that may hold indexes nobody
+declared. Here both sides are Lean code: an index that is in `source` and not in `target` is one
+that was deleted from the declared schema, and a migration that closes the gap has to drop it, or
+the plan it produces would never be empty.
+
+Tables `target` does not declare are skipped, as there: one that is about to be dropped takes its
+indexes with it.
+
+The tables are visited in sorted order, rather than in whatever order the hash map lists them, so
+that the generated migration is the same text every time it is generated. -/
+def DatabaseRecipe.declaredIndexOperations (source target : DatabaseRecipe) :
+    Array IndexOperation :=
+  Id.run do
+    let mut res := #[]
+    for name in target.tables.keys.mergeSort (fun a b => decide (a ≤ b)) do
+      let some targetTable := target.tables[name]? | continue
+      let sourceIndexes := (source.tables[name]?.map (·.indexes)).getD []
+      -- The drops first: a name has to be free before it can be taken again, and a name being
+      -- dropped for good is no different from one being re-created under a new shape.
+      for idx in sourceIndexes do
+        match targetTable.indexes.find? (·.name == idx.name) with
+        | some declared => unless declared == idx do res := res.push (.drop name idx.name)
+        | none => res := res.push (.drop name idx.name)
+      for idx in targetTable.indexes do
+        match sourceIndexes.find? (·.name == idx.name) with
+        | some existing => unless existing == idx do res := res.push (.create name idx)
+        | none => res := res.push (.create name idx)
+    return res
+
+/-- The same recipe without the named tables.
+
+This exists for one caller: `autoUpdate` has to ignore the table the declarative migrations record
+themselves in. That table is a table like any other and schema introspection reports it, so a
+target schema that does not declare it — and no application schema does, it is the framework's
+bookkeeping — would otherwise make `autoUpdate` drop it and lose the migration history. -/
+def DatabaseRecipe.without (r : DatabaseRecipe) (names : List String) : DatabaseRecipe where
+  tables := r.tables.filter fun name _ => !names.contains name
+
+/-- The name of the table in which `Db.Migration.migrate` records the migrations it has applied.
+
+It is declared here, far from the declarative migration layer that owns it, so that `autoUpdate`
+can leave it alone without `Db.Interpretation.Basic` having to import that layer — which imports
+it in turn. -/
+def Db.Migration.trackingTableName : String := "db_migrations"
+
+/-- The names of the tables the migration framework owns, which a declared schema does not mention
+and `autoUpdate` therefore must not drop. -/
+def Db.Migration.frameworkTables : List String := [Db.Migration.trackingTableName]
+
 /-- The names of the tables that exist in both schemas but declare different constraints.
 
 The operation language describes column changes only, so a constraint change on an existing table

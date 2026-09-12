@@ -5,6 +5,7 @@ Authors: Christian Merten
 -/
 import Db.Migration.Basic
 import Db.Migration.Recipe
+import Db.Backends.Dialect
 
 structure Interpretation (query : Type) where
   fromQuery {d : Database} (view : View d) (q : Query d view) : query
@@ -50,6 +51,19 @@ class DBMonadWithMigrations (m : Type → Type) where
   column changes only, and an index is not one: it is an object beside the table, said whole by a
   single `CREATE INDEX` or `DROP INDEX`. -/
   executeIndex (op : IndexOperation) : m Unit
+  /-- The SQL dialect the backend speaks, for the raw statements of a declared migration.
+
+  A field rather than a method, the dialect being a property of the backend and not of a run: a
+  `Db.Migration.Step.sql` step is a function of it, so that one migration can be declared once and
+  applied on either backend. -/
+  dialect : SQL.Dialect
+  /-- Run one statement as given, discarding any rows.
+
+  The escape hatch the declarative migrations need: the operation language says column changes
+  only, so a constraint change or a data fix-up has to be written as SQL. Rows are discarded rather
+  than returned because a migration step has nothing to return them to; a statement whose result is
+  wanted is a query, and goes through `DBMonad.lookup`. -/
+  rawExecute (statement : String) : m Unit
   /-- Give up on a migration that cannot be carried out, reporting why. -/
   abort {α : Type} (message : String) : m α
 
@@ -69,9 +83,15 @@ def init (database : DatabaseRecipe) : m Unit := do
 
 The operation language describes column changes only, so a table whose constraints differ from the
 target aborts the migration instead of being brought into a state that only looks like the target
-schema. -/
+schema.
+
+`autoUpdate` and the declarative migrations of `Db.Migration` are alternatives — the first for
+development, the second for production — but a database may well have been under both, so the
+tables the migration framework owns are hidden from `source` here. They are tables like any other
+and introspection reports them, and no application schema declares them, so without this the first
+`autoUpdate` after a `migrate` would drop the migration history. -/
 def autoUpdate (target : DatabaseRecipe) : m Unit := do
-  let source ← currentDatabase
+  let source := (← currentDatabase).without Db.Migration.frameworkTables
   letI mismatches := source.constraintMismatches target
   unless mismatches.isEmpty do
     abort <|
