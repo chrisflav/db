@@ -110,6 +110,20 @@ def insert (x : α) : m Unit :=
 def insertData (x : α) : (HasModel.database α).Insert (HasModel.model α).index :=
   .ofEntry <| HasTable.encoding.toFun x
 
+/-- Insert `x`, doing nothing if a row conflicting with it is already stored. Returns whether the
+row was inserted. -/
+def insertIfAbsent (x : α) : m Bool := do
+  let rows ← DBMonad.insertReturning (d := HasModel.database α)
+    { insertData x with onConflict := .ignore }
+  return !rows.isEmpty
+
+/-- Insert `x`, and when a row already conflicts with it on `target`, overwrite the columns in
+`set` with the values `x` carried. -/
+def upsert (x : α) (target set : List ((HasModel.model α).table.Index)) : m (Array α) := do
+  let rows ← DBMonad.insertReturning (d := HasModel.database α)
+    { insertData x with onConflict := .update target set }
+  return rows.map HasView.encoding.invFun
+
 /-- Insert `x` and return the row the database stored, which is how the value of a column the
 database generates, such as an `AutoKey`, is obtained without a second query. -/
 def insertReturning (x : α) : m α := do

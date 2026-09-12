@@ -5,3 +5,4 @@ import Db.Examples.Postgres
 def main : IO Unit := do
   BookExample.test
   BookExample.indexTest
+  BookExample.conflictTest
