@@ -7,3 +7,4 @@ def main : IO Unit := do
   BookExample.indexTest
   BookExample.conflictTest
   BookExample.leftJoinTest
+  BookExample.correlateTest
