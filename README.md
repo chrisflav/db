@@ -498,17 +498,19 @@ let applied ← Db.Migration.migrate migrations now   -- `now`: Unix seconds
 ```
 
 The record lives in a table `db_migrations (name text NOT NULL PRIMARY KEY, applied_at integer NOT
-NULL)`, which `migrate` creates when it is absent. It is read and written through the ordinary typed
-API, so it works on every backend without a line of backend-specific SQL. `now` is a parameter
-rather than a clock call, so that the class need not be over `IO` and a test can pin the time; the
-CLI below supplies it from `Std.Time.Timestamp.now`.
+NULL)`, which `migrate` creates with a single `CREATE TABLE IF NOT EXISTS` — one statement, so that
+two `migrate`s starting at the same time cannot both find it absent and both create it. It is read
+and written through the ordinary typed API, so it works on every backend without a line of
+backend-specific SQL. `now` is a parameter rather than a clock call, so that the class need not be
+over `IO` and a test can pin the time; the CLI below supplies it from `Std.Time.Timestamp.now`.
 
 `migrate` validates before it applies anything: the names have to be unique, and every name the
 database records has to appear in the list. A recorded migration the code does not declare means the
 database is ahead of the code, and applying the rest on top of a history nobody has is how a schema
 ends up in a state no code describes. `Db.Migration.applied` lists what is recorded and
 `Db.Migration.pending` what is not (by name — `Migration` is in `Type 1`, a `run` step quantifying
-over the monad, so it cannot be returned from `m`).
+over the monad, so it cannot be returned from `m`). Neither of them creates anything: a database
+with no tracking table has applied no migrations, which is what they report.
 
 `db_migrations` is a table like any other and schema introspection reports it, so `autoUpdate` would
 drop it as a table the target does not declare. It does not: `autoUpdate` hides the framework's own
@@ -519,6 +521,13 @@ developing, migrations once the schema is deployed.
 
 A migration is applied inside a transaction by default, so a step that fails leaves neither a
 half-applied schema nor a record claiming the migration was applied.
+
+Its record is written *first*, inside that transaction, which is what keeps two `migrate`s running
+at the same time from applying the same migration twice: `name` is the primary key of the tracking
+table, so the second run's insert blocks on the first run's uncommitted row and then fails on the
+duplicate key, before it has applied a single step, and its transaction takes the attempt back with
+it. A migration declared `atomic := false` writes its record after its last step instead — it has no
+transaction to be taken back, so a record written first would outlive a failure half way.
 
 SQLite cannot change the type or nullability of a column in place; the backend realises such a
 change by rebuilding the table, and the rebuild has to turn off foreign-key enforcement while it
@@ -571,7 +580,18 @@ by the schema step that says so.
 
 Unlike `autoUpdate`, an index the declared schema no longer names **is dropped**. `autoUpdate` runs
 against a live database that may hold indexes nobody declared and leaves those alone; here both
-sides are Lean code, so an index that disappeared from the code is a deletion like any other.
+sides are Lean code, so an index that disappeared from the code is a deletion like any other. Every
+drop is planned before every create, because an index name is unique across the whole database on
+both backends: an index name that moves from one table to another has to be freed before it is
+taken again.
+
+Dropping a column takes the indexes over it with it. The plan says so explicitly, emitting the
+`dropIndex` steps before the `dropColumn`: PostgreSQL would drop such an index along with the
+column, but SQLite refuses to drop an indexed column at all, and the pair in that order is what both
+backends accept. A **constraint** over the column is the other case: dropping a column that is part
+of the primary key, of a `UNIQUE` group or of a foreign key is refused, with the same reasoning as
+for any other constraint change — it is never migrated silently. Drop the constraint by hand in a
+`Step.sql` step first, or drop and recreate the table.
 
 A plan containing an `alterColumn` is rendered with a comment saying that it rebuilds the table on
 SQLite and may need `atomic := false`. The generator leaves `atomic` at its default rather than

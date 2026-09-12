@@ -220,6 +220,19 @@ introspecting a database: the same two migrations run on SQLite and on PostgreSQ
 def migrationsDemo {m : Type → Type} [Monad m] [DBMonadWithMigrations m] [DBMonadTransactional m]
     [MonadLiftT IO m] (label : String) : m Unit := do
   IO.println s!"Declarative migrations ({label}):"
+  -- Reading the record creates nothing: a database nothing has ever migrated has no tracking table
+  -- and no applied migrations, and `applied` says the second without causing the first.
+  IO.println <|
+    s!"  before the first migrate — recorded: {← Db.Migration.applied (m := m)}, " ++
+    s!"tracking table: " ++
+    s!"{(← DBMonadWithMigrations.currentDatabase).tables.contains Db.Migration.trackingTableName}"
+  -- And `migrate` creates it with one conditional statement rather than a check and a `CREATE
+  -- TABLE`, which two concurrent runs would both pass and one of them then fail on.
+  let createTracking :=
+    Db.Migration.createTrackingTableStatement (DBMonadWithMigrations.dialect (m := m))
+  IO.println <|
+    s!"  the tracking table is created conditionally: " ++
+    s!"{occurs createTracking "CREATE TABLE IF NOT EXISTS"}"
   let firstRun ← Db.Migration.migrate migrations 1700000000
   IO.println s!"  migrate applied: {firstRun}"
   let secondRun ← Db.Migration.migrate migrations 1700000001
@@ -305,6 +318,123 @@ def renameDemo {m : Type → Type} [Monad m] [DBMonadWithMigrations m] [DBMonadT
     s!"  after the renames — column operations: {(mine.operations folded).size}, " ++
     s!"constraint mismatches: {mine.constraintMismatches folded}, " ++
     s!"index operations: {(mine.declaredIndexOperations folded).size}"
+
+/-! ### Dropping an indexed column, and moving an index name
+
+What a codebase does to a model after the renames: a field goes away, and an index is declared on
+another table under a name that is already taken. Both are planned by `makemigrations` and then
+applied, because the interesting question is not what the plan looks like but whether both backends
+accept it. -/
+
+/-- The schema the migrations fold to, or the fold's own complaint. -/
+def foldOrAbort {m : Type → Type} [Monad m] [DBMonadWithMigrations m] (ms : List Migration) :
+    m DatabaseRecipe :=
+  match Migration.foldAll ms with
+  | .ok recipe => pure recipe
+  | .error e => DBMonadWithMigrations.abort e
+
+/-- `current` restricted to the tables the migrations own; the database is shared with the other
+demos, and the tracking table is nobody's declared schema. -/
+def restrictedTo (current folded : DatabaseRecipe) : DatabaseRecipe :=
+  { tables := current.tables.filter fun name _ => folded.tables.contains name }
+
+/-- The declared schema after the model drops the field `published`, which the index
+`idx_mig_book_year` is over. A declared schema that kept the index over a column it no longer has
+would be one no database can be in, so the index goes with the field. -/
+def withoutPublished (r : DatabaseRecipe) : DatabaseRecipe :=
+  { tables := r.tables.map fun name t =>
+      if name == "mig_book" then
+        { t with
+          columns := t.columns.erase "published"
+          indexes := t.indexes.filter (fun idx => !idx.keys.any (·.column == "published")) }
+      else t }
+
+/-- An index on `mig_writer`, whose *name* the next declared schema moves to `mig_book`. -/
+def sharedIndex : TableIndex String :=
+  { name := "idx_mig_shared", keys := [{ column := "age" }] }
+
+/-- The migration that creates it. Hand-written rather than planned: what is being tested is the
+plan that moves it afterwards. -/
+def sharedIndexMigration : Migration where
+  name := "0201_shared_index"
+  steps := [.createIndex "mig_writer" sharedIndex]
+
+/-- The declared schema after the index name `idx_mig_shared` moves from `mig_writer` to
+`mig_book`, over a column of its own.
+
+An index name is unique across the whole database on both backends, so this is a drop and a create
+that have to be emitted in that order. `mig_book` sorts before `mig_writer`, so a plan that ordered
+the index operations table by table would emit the create first, and the backend would refuse it:
+the name is still taken. -/
+def movedSharedIndex (r : DatabaseRecipe) : DatabaseRecipe :=
+  { tables := r.tables.map fun name t =>
+      if name == "mig_writer" then
+        { t with indexes := t.indexes.filter (·.name != sharedIndex.name) }
+      else if name == "mig_book" then
+        { t with indexes := t.indexes ++ [{ sharedIndex with keys := [{ column := "note" }] }] }
+      else t }
+
+/-- Drop a column an index is over, then move an index name to another table, planning both with
+`makemigrations` and applying what it plans.
+
+`base` is what `renameDemo` was given: this runs on the schema the renames left, so the column is
+called `published` and the table `mig_writer`. -/
+def dropColumnDemo {m : Type → Type} [Monad m] [DBMonadWithMigrations m] [DBMonadTransactional m]
+    [MonadLiftT IO m] (base : List Migration) : m Unit := do
+  let all := base ++ [renameMigration]
+  let folded ← foldOrAbort all
+  -- What the fold makes of a `dropColumn` on its own. An index over the column goes with it, the
+  -- way PostgreSQL drops it; a constraint over it is refused, the way a constraint change always
+  -- is here.
+  match Step.apply folded (Step.dropColumn "mig_book" "published") with
+  | .error e =>
+    IO.println s!"  dropping the indexed column was refused, which it should not be: {e}"
+  | .ok next =>
+    letI left := ((next.tables["mig_book"]?.map (·.indexes)).getD []).map (·.name)
+    IO.println s!"  in the fold, dropping `published` leaves mig_book with the indexes {left}"
+  for column in ["title", "author"] do
+    match Step.apply folded (Step.dropColumn "mig_book" column) with
+    | .ok _ => IO.println s!"  dropping `{column}` was accepted, which it should not be"
+    | .error e => IO.println s!"  {e}"
+  -- The plan, and then the database.
+  match planSteps all (withoutPublished folded) with
+  | .error e => IO.println s!"  no plan for the drop: {e}"
+  | .ok dropSteps =>
+    IO.println "  planned steps for dropping the indexed column:"
+    for step in dropSteps do
+      IO.println s!"    {step.describe}"
+    let withDrop := all ++ [{ name := "0200_drop_published", steps := dropSteps }]
+    IO.println s!"  applied: {← Db.Migration.migrate withDrop 1700000200}"
+    let withShared := withDrop ++ [sharedIndexMigration]
+    IO.println s!"  the shared index created: {← Db.Migration.migrate withShared 1700000201}"
+    let foldedShared ← foldOrAbort withShared
+    match planSteps withShared (movedSharedIndex foldedShared) with
+    | .error e => IO.println s!"  no plan for the move: {e}"
+    | .ok moveSteps =>
+      IO.println "  planned steps for moving the index name to another table:"
+      for step in moveSteps do
+        IO.println s!"    {step.describe}"
+      let withMove := withShared ++ [{ name := "0202_move_index", steps := moveSteps }]
+      IO.println s!"  applied: {← Db.Migration.migrate withMove 1700000202}"
+      -- The database and the fold still agree, which is what makes the next plan trustworthy.
+      let foldedFinal ← foldOrAbort withMove
+      let mine := restrictedTo (← DBMonadWithMigrations.currentDatabase) foldedFinal
+      IO.println <|
+        s!"  after both — column operations: {(mine.operations foldedFinal).size}, " ++
+        s!"constraint mismatches: {mine.constraintMismatches foldedFinal}, " ++
+        s!"index operations: {(mine.declaredIndexOperations foldedFinal).size}"
+
+/-- An atomic migration that gives up half way: its first step succeeds and its second does not.
+
+The record of an atomic migration is written before its steps, so that a second `migrate` running
+at the same time fails on the primary key of the tracking table rather than applying everything a
+second time. This is what shows the record is nonetheless not left behind when the migration
+fails: the transaction takes it back with the table the first step created. -/
+def failingMigration : Migration where
+  name := "0900_fails"
+  steps :=
+    [ .createTable "mig_never" { columns := .ofList [("x", { type := .int, nullable := true })] },
+      .run (DBMonadWithMigrations.abort "this migration always gives up, on purpose") ]
 
 /-- Record a migration the code does not declare, which is the state `migrate` refuses to run in:
 the database is then ahead of the code, and applying the rest on top of a history nobody has would

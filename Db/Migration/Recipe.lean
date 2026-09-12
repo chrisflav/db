@@ -319,26 +319,32 @@ the plan it produces would never be empty.
 Tables `target` does not declare are skipped, as there: one that is about to be dropped takes its
 indexes with it.
 
+Every drop comes before every create, and not merely before the creates of its own table. An index
+name is unique across the whole database on both backends, so an index that moves from one table to
+another — the same name over a new home — is a drop on the old table and a create on the new one,
+and the create fails while the old one still holds the name. Ordering the operations table by table
+would put the two in whichever order the table names happen to sort in.
+
 The tables are visited in sorted order, rather than in whatever order the hash map lists them, so
 that the generated migration is the same text every time it is generated. -/
 def DatabaseRecipe.declaredIndexOperations (source target : DatabaseRecipe) :
     Array IndexOperation :=
   Id.run do
-    let mut res := #[]
+    let mut drops := #[]
+    let mut creates := #[]
     for name in target.tables.keys.mergeSort (fun a b => decide (a ≤ b)) do
       let some targetTable := target.tables[name]? | continue
       let sourceIndexes := (source.tables[name]?.map (·.indexes)).getD []
-      -- The drops first: a name has to be free before it can be taken again, and a name being
-      -- dropped for good is no different from one being re-created under a new shape.
+      -- A name being dropped for good is no different from one being re-created under a new shape.
       for idx in sourceIndexes do
         match targetTable.indexes.find? (·.name == idx.name) with
-        | some declared => unless declared == idx do res := res.push (.drop name idx.name)
-        | none => res := res.push (.drop name idx.name)
+        | some declared => unless declared == idx do drops := drops.push (.drop name idx.name)
+        | none => drops := drops.push (.drop name idx.name)
       for idx in targetTable.indexes do
         match sourceIndexes.find? (·.name == idx.name) with
-        | some existing => unless existing == idx do res := res.push (.create name idx)
-        | none => res := res.push (.create name idx)
-    return res
+        | some existing => unless existing == idx do creates := creates.push (.create name idx)
+        | none => creates := creates.push (.create name idx)
+    return drops ++ creates
 
 /-- The same recipe without the named tables.
 

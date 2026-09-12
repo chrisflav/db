@@ -45,6 +45,11 @@ def indexTest : IO Unit := do
     let current ← currentDatabase
     for idx in (current.tables["book"]?.map (·.indexes)).getD [] do
       IO.println s!"  read back: {repr idx}"
+    -- The unique index is the one this demo cannot leave behind: `book` is shared with every other
+    -- demo, and a unique index over `title` rejects the second insert of a title in the next run
+    -- of the suite as surely as in this one. The three plain indexes cost the later demos nothing
+    -- and stay, so that a re-run reads back what it created rather than creating it again.
+    executeIndex (.drop "book" "idx_book_title_unique")
   match ← PostgreSQL.runDB (← postgresUrl) x with
   | .error e => IO.println s!"Error occured: {repr e}."
   | .ok _ => pure ()
@@ -179,8 +184,23 @@ def migrationsTest : IO Unit := do
     catch _ =>
       IO.println "  refused, as expected."
     MigrationExample.forgetUnknownMigration
+    -- An atomic migration records itself before it runs its steps, so that a second `migrate`
+    -- racing it fails on the primary key of the tracking table instead of applying everything
+    -- twice. The record is inside the transaction, so a migration that fails leaves nothing.
+    try
+      let _ ← Db.Migration.migrate
+        (MigrationExample.migrations ++ [MigrationExample.failingMigration]) 1700000900
+      IO.println "  a failing migration was accepted, which it should not be."
+    catch _ =>
+      IO.println "  the failing migration was rolled back, as expected."
+    let afterFailure ← currentDatabase
+    IO.println <|
+      s!"  recorded after the rollback: {← Db.Migration.applied (m := PostgreSQL.M)}, " ++
+      s!"its first step's table: {afterFailure.tables.contains "mig_never"}"
     -- The renames, whose point is that the folded schema follows them the way the database does.
     MigrationExample.renameDemo MigrationExample.migrations
+    -- Dropping a column an index is over, and moving an index name between tables.
+    MigrationExample.dropColumnDemo MigrationExample.migrations
     drop
   match ← PostgreSQL.runDB (← postgresUrl) x with
   | .error e => IO.println s!"Error occured: {repr e}."
@@ -229,6 +249,12 @@ def test : IO Unit := do
   let x : PostgreSQL.M (Array Book) := do
     -- Update database schema to target schema
     autoUpdate (%database mydb)
+    -- Unlike the in-memory SQLite database, this one keeps what the last run of the suite left, so
+    -- the demo starts from its own rows: inserting these four again on top of the previous run's
+    -- would print every book twice, and did not get that far while the unique index on `title`
+    -- that `indexTest` used to leave behind was still there.
+    let _ ← HasModel.delete (α := Book) .true
+    let _ ← HasModel.delete (α := Author) .true
     -- Insert some data into the database
     insert mike
     insert lisa
