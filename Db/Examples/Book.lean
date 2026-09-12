@@ -169,6 +169,45 @@ def migrationsTest : IO Unit := do
   | .error e => IO.println s!"Error occured: {repr e}."
   | .ok _ => pure ()
 
+/-- Identifier quoting against a real server. This is the backend the issue was about: PostgreSQL
+folds an unquoted identifier to lower case, so before the quoting a column declared `addedAt` was
+stored as `addedat`, introspection read back a name the target schema did not have, and
+`autoUpdate` proposed to add `addedAt` again on every run — it never converged. The reserved words
+`order` and `select` did not get that far at all; they were syntax errors. -/
+def identifierTest : IO Unit := do
+  let x : PostgreSQL.M Unit := do
+    autoUpdate readingListDb
+    -- Re-runs of the suite find the rows the last one left, and the demo prints them.
+    let _ ← HasModel.delete (α := ReadingList) .true
+    insert gatsby
+    insert moby
+    IO.println "Reading list (PostgreSQL):"
+    for row in ← fetch (QuerySet.all (α := ReadingList)) do
+      IO.println <|
+        s!"  order={row.order} addedAt={row.addedAt} select={row.select} {row.bookTitle}"
+    -- The fixed point that used never to be reached: with the declared case preserved, a second
+    -- `autoUpdate` against the same target has nothing left to do, indexes included.
+    autoUpdate readingListDb
+    let current ← currentDatabase
+    IO.println <|
+      s!"Pending operations after two autoUpdates (PostgreSQL): " ++
+      s!"{(current.operations readingListDb).size}, " ++
+      s!"index operations: {(current.indexOperations readingListDb).size}"
+    for idx in (current.tables["readingList"]?.map (·.indexes)).getD [] do
+      IO.println s!"  read back: {repr idx}"
+    let moved ← HasModel.updateReturning (α := ReadingList)
+      { value
+          | .order => some (.int 99)
+          | _ => none
+        condition := .eq (.var ReadingListIndex.addedAt .int) (.int moby.addedAt) }
+    IO.println s!"Updated (PostgreSQL): {moved.map fun r => (r.bookTitle.val, r.order)}"
+    let dropped ← HasModel.deleteReturning (α := ReadingList)
+      (.var ReadingListIndex.select .bool)
+    IO.println s!"Deleted the selected row(s) (PostgreSQL): {dropped.map (·.bookTitle.val)}"
+  match ← PostgreSQL.runDB (← postgresUrl) x with
+  | .error e => IO.println s!"Error occured: {repr e}."
+  | .ok _ => pure ()
+
 def test : IO Unit := do
   let x : PostgreSQL.M (Array Book) := do
     -- Update database schema to target schema

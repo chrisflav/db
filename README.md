@@ -661,10 +661,36 @@ discards only its own work while an outer failure still discards everything. On 
 failure of the backend's own exception type rolls back; an `IO` error thrown underneath escapes
 with the transaction still open.
 
-A caveat on identifiers: DDL emits them unquoted, so PostgreSQL folds a mixed-case column name to
-lower case while SQLite keeps it. Queries and returning statements are unaffected, as both alias
-their columns, but schema introspection on PostgreSQL then reports the folded name and `autoUpdate`
-does not converge. Keep column names lower case for now.
+## Identifiers
+
+Every table, column, index and alias name the library emits is double-quoted, so names keep the
+case they were declared with on both backends and may be reserved words:
+
+```lean4
+@[model (dbName := "readingList") mydb]
+structure ReadingList where
+  order : Int
+  addedAt : Int
+  «select» : Bool
+```
+
+`addedAt` is stored as `addedAt`, not as `addedat`, and `order` and `select` are names rather than
+syntax errors. Without the quoting PostgreSQL folds an unquoted identifier to lower case while
+SQLite keeps it, so schema introspection on PostgreSQL reported the folded name and `autoUpdate`
+proposed to add the declared one again on every run.
+
+A PostgreSQL database created by an earlier version of this library has folded, lower-case names
+for every mixed-case column, and `autoUpdate` against it now sees a column the target schema does
+not declare — it will propose to drop `addedat` and add `addedAt`, losing the data in it. Rename
+such columns by hand first:
+
+```sql
+ALTER TABLE t RENAME COLUMN createdat TO "createdAt";
+```
+
+A table name may not contain a dot: a dotted name is read as `schema.table` and quoted one
+component at a time, which is what lets the library name PostgreSQL's `information_schema.columns`
+catalogue.
 
 ## Design
 

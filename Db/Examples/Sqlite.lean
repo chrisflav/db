@@ -967,6 +967,53 @@ def migrationsDemo : Sqlite.M Unit := do
     s!"  mig_book.year is now " ++
     s!"{repr ((current.tables["mig_book"]?.bind (·.columns["year"]?)).map (·.type))}"
   IO.println s!"  rows preserved across the rebuild: {(← query "SELECT * FROM mig_book").size}"
+/-- Exercise identifier quoting: a table whose name and columns are mixed-case and include two
+reserved words. Everything the library emits is double-quoted, so the names survive as declared and
+`autoUpdate` converges — which is the point of the quoting, and what PostgreSQL used to fail at
+because it folds an unquoted identifier to lower case. SQLite keeps the case either way, so what
+this checks here is that the quoted SQL is accepted at all, that the reserved words are usable as
+names, and that an index over a quoted column reads back as the one that was declared. -/
+def identifierDemo : Sqlite.M Unit := do
+  autoUpdate readingListDb
+  IO.println s!"SQL: {(SQL.Select.fromQuery (QuerySet.all (α := ReadingList)).query).toString}"
+  insert gatsby
+  insert moby
+  IO.println "Reading list (SQLite):"
+  for row in ← fetch (QuerySet.all (α := ReadingList)) do
+    IO.println <|
+      s!"  order={row.order} addedAt={row.addedAt} select={row.select} {row.bookTitle}"
+  -- The fixed point: a second `autoUpdate` against the same target has nothing left to do, columns
+  -- and indexes alike. A mixed-case column read back folded would be proposed again on every run.
+  autoUpdate readingListDb
+  let current ← currentDatabase
+  IO.println <|
+    s!"Pending operations after two autoUpdates: {(current.operations readingListDb).size}, " ++
+    s!"index operations: {(current.indexOperations readingListDb).size}"
+  for idx in (current.tables["readingList"]?.map (·.indexes)).getD [] do
+    IO.println s!"  read back: {repr idx}"
+  -- `UPDATE ... RETURNING` and `DELETE ... RETURNING` name the mixed-case and the reserved columns
+  -- on both sides of the statement.
+  let moved ← HasModel.updateReturning (α := ReadingList)
+    { value
+        | .order => some (.int 99)
+        | _ => none
+      condition := .eq (.var ReadingListIndex.addedAt .int) (.int moby.addedAt) }
+  IO.println s!"Updated: {moved.map fun r => (r.bookTitle.val, r.order)}"
+  let dropped ← HasModel.deleteReturning (α := ReadingList)
+    (.var ReadingListIndex.select .bool)
+  IO.println s!"Deleted the selected row(s): {dropped.map (·.bookTitle.val)}"
+  -- The index parser has to read a quoted column back out of a `CREATE INDEX` in either backend's
+  -- spelling: SQLite stores the text as it was written, PostgreSQL re-prints it in its canonical
+  -- form, with a cast. The parser is shared, so SQLite is where both are cheapest to check.
+  let parsed : String → String := fun sql =>
+    match SQL.Migration.parseCreateIndex? "i" sql with
+    | some idx => ", ".intercalate (idx.keys.map fun k => s!"{k.column} {repr k.collation}")
+    | none => "(unparsed)"
+  IO.println <|
+    s!"SQLite spelling `lower(\"title\")`: {parsed "CREATE INDEX i ON t (lower(\"title\"))"}"
+  IO.println <|
+    s!"PostgreSQL spelling `lower((\"title\")::text)`: " ++
+    s!"{parsed "CREATE INDEX i ON t USING btree (lower((\"title\")::text))"}"
 
 /-- Run both demos against a fresh in-memory SQLite database. -/
 def test : IO Unit := do
@@ -986,5 +1033,6 @@ def test : IO Unit := do
   Sqlite.runDB ":memory:" correlateDemo
   Sqlite.runDB ":memory:" modelConflictDemo
   Sqlite.runDB ":memory:" migrationsDemo
+  Sqlite.runDB ":memory:" identifierDemo
 
 end SqliteExample

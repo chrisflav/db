@@ -10,3 +10,4 @@ def main : IO Unit := do
   BookExample.correlateTest
   BookExample.extendTest
   BookExample.migrationsTest
+  BookExample.identifierTest

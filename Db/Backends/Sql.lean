@@ -124,6 +124,25 @@ def collated : Collation → String → String
 def quoteString (s : String) : String :=
   "'" ++ s.replace "'" "''" ++ "'"
 
+/-- A double-quoted SQL identifier, with embedded double quotes doubled.
+
+Quoting is what keeps the identifier's case on PostgreSQL, which folds an unquoted one to lower
+case while SQLite keeps it as written — so a column declared `createdAt` came back from PostgreSQL
+introspection as `createdat`, and `autoUpdate` proposed to add it again on every run. It is also
+what lets a reserved word (`order`, `select`, `user`) be a name at all. Both backends spell a
+quoted identifier the same way, so this needs no dialect. -/
+def quoteIdent (s : String) : String :=
+  "\"" ++ s.replace "\"" "\"\"" ++ "\""
+
+/-- A possibly schema-qualified relation name, `schema.table`, quoted one component at a time.
+
+Quoting the whole of `information_schema.columns` as one identifier would name a table whose name
+contains a dot rather than the catalogue view; that catalogue is the one place inside the library
+where a qualified name occurs. The cost is that a table whose own name contains a dot cannot be
+named — a dotted name is always read as `schema.table`. -/
+def quoteQualified (s : String) : String :=
+  ".".intercalate ((s.splitOn ".").map quoteIdent)
+
 def sortDirectionToString : SortDirection → String
   | .asc => "ASC"
   | .desc => "DESC"
@@ -165,8 +184,8 @@ partial def Expr.toString : Expr → String
       | some e => e.toString
       | none => "*"
     s!"{fn}({if distinct then "DISTINCT " else ""}{inner})"
-  | .column table col => s!"{table}.{col}"
-  | .var name => name
+  | .column table col => s!"{quoteQualified table}.{quoteIdent col}"
+  | .var name => quoteIdent name
   | .str s => quoteString s
   | .int n => ToString.toString n
   | .add e₁ e₂ => s!"({e₁.toString}) + ({e₂.toString})"
@@ -176,21 +195,24 @@ partial def Expr.toString : Expr → String
 
 partial def Selector.toString : Selector → String
   | .all => "*"
-  | .fields fs => ", ".intercalate (fs.map <| fun f ↦ s!"{f.2.toString} as \"{f.1}\"")
+  | .fields fs => ", ".intercalate (fs.map <| fun f ↦ s!"{f.2.toString} as {quoteIdent f.1}")
 
 partial def JoinConnect.toString : JoinConnect → String
   | .onCondition cond =>
     s!"ON {cond.toString}"
+  -- `USING` takes a parenthesised, comma-separated list, and its entries are column names like any
+  -- other. The first column is a separate field only so that the list cannot be empty, which SQL
+  -- would not accept.
   | .usingColumn column columns =>
-    s!"USING {column}{" , ".intercalate columns}"
+    s!"USING ({", ".intercalate ((column :: columns).map quoteIdent)})"
 
 partial def From.toString : From → String
   | .tableName name (.some alias) =>
-    s!"{name} AS {alias}"
+    s!"{quoteQualified name} AS {quoteIdent alias}"
   | .tableName name none =>
-    s!"{name}"
+    s!"{quoteQualified name}"
   | .select select (.some alias) =>
-    s!"( {select.toString} ) AS {alias}"
+    s!"( {select.toString} ) AS {quoteIdent alias}"
   | .select select none =>
     s!"( {select.toString} )"
   | .join left right joinType connect =>
@@ -446,8 +468,11 @@ def ConflictClause.toString : ConflictClause → String
   | .ignore => " ON CONFLICT DO NOTHING"
   | .update _ [] => " ON CONFLICT DO NOTHING"
   | .update target set =>
-    letI assignments := ", ".intercalate (set.map fun c => s!"{c} = excluded.{c}")
-    s!" ON CONFLICT ({", ".intercalate target}) DO UPDATE SET {assignments}"
+    -- `excluded` names the row the statement could not store, not anything anybody declared, so
+    -- it is the one name here that stays bare.
+    letI assignments :=
+      ", ".intercalate (set.map fun c => s!"{quoteIdent c} = excluded.{quoteIdent c}")
+    s!" ON CONFLICT ({", ".intercalate (target.map quoteIdent)}) DO UPDATE SET {assignments}"
 
 structure Insert where
   intoTable : String
@@ -473,13 +498,16 @@ def Insert.fromInsert {d : Database} {tableName : d.Index} (ins : d.Insert table
 
 /-- The `RETURNING` clause a statement carries when it is asked for its rows.
 
-The columns are aliased rather than returned as `*`, exactly as `Selector.toString` aliases the
-columns of a `SELECT`: the databases fold an unquoted identifier to a case of their own, so a
-column whose name is not already in that case would come back under a name the interpretation does
-not look for. -/
+The columns are listed and aliased rather than returned as `*`, exactly as `Selector.toString`
+aliases the columns of a `SELECT`, so that the statement states the name each value comes back
+under instead of leaving it to the backend. Now that the column reference is quoted the alias
+repeats a name the database would have used anyway, but it also fixes the order the columns come
+back in, which `*` leaves to the table's own column order. -/
 def returningClause (columns : List String) : String :=
   if columns.isEmpty then ""
-  else " RETURNING " ++ ", ".intercalate (columns.map fun c => s!"{c} as \"{c}\"")
+  else
+    " RETURNING " ++
+      ", ".intercalate (columns.map fun c => s!"{quoteIdent c} as {quoteIdent c}")
 
 /-- The names of the columns of a table, which is what a returning statement asks for. -/
 def columnNames {d : Database} (tableName : d.Index) : List String :=
@@ -489,12 +517,12 @@ def Insert.toString (ins : Insert) : String :=
   -- An insert that supplies no column at all has to be written `DEFAULT VALUES`; the empty column
   -- and value lists are a syntax error.
   if ins.values.isEmpty then
-    s!"INSERT INTO {ins.intoTable} DEFAULT VALUES" ++
+    s!"INSERT INTO {quoteQualified ins.intoTable} DEFAULT VALUES" ++
       ins.onConflict.toString ++ returningClause ins.returning
   else
-    letI columns := ", ".intercalate (ins.values.map Prod.fst)
+    letI columns := ", ".intercalate (ins.values.map fun x => quoteIdent x.1)
     letI values := ", ".intercalate (ins.values.map fun x => x.2.toString)
-    s!"INSERT INTO {ins.intoTable} ({columns}) VALUES ({values})" ++
+    s!"INSERT INTO {quoteQualified ins.intoTable} ({columns}) VALUES ({values})" ++
       ins.onConflict.toString ++ returningClause ins.returning
 
 /-- An `UPDATE` statement targeting a single table. -/
@@ -507,8 +535,9 @@ structure Update where
   returning : List String := []
 
 def Update.toString (upd : Update) : String :=
-  letI sets := ", ".intercalate (upd.assignments.map fun a => s!"{a.1} = {a.2.toString}")
-  s!"UPDATE {upd.table} SET {sets} WHERE {upd.condition.toString}" ++
+  letI sets :=
+    ", ".intercalate (upd.assignments.map fun a => s!"{quoteIdent a.1} = {a.2.toString}")
+  s!"UPDATE {quoteQualified upd.table} SET {sets} WHERE {upd.condition.toString}" ++
     returningClause upd.returning
 
 def Update.fromUpdate {d : Database} {tableName : d.Index} (upd : d.Update tableName) : Update where
@@ -527,7 +556,7 @@ structure Delete where
   returning : List String := []
 
 def Delete.toString (del : Delete) : String :=
-  s!"DELETE FROM {del.fromTable} WHERE {del.condition.toString}" ++
+  s!"DELETE FROM {quoteQualified del.fromTable} WHERE {del.condition.toString}" ++
     returningClause del.returning
 
 def Delete.fromDelete {d : Database} {tableName : d.Index} (del : d.Delete tableName) :
@@ -646,13 +675,16 @@ def FieldDef.toString (dialect : Dialect) (fieldDef : FieldDef) : String :=
     match dialect with
     -- SQLite only auto-increments a column declared exactly `INTEGER PRIMARY KEY`, and declares
     -- the key inline; `CreateTable.toString` therefore omits the separate `PRIMARY KEY` clause.
-    | .sqlite => s!"{fieldDef.name}  INTEGER PRIMARY KEY AUTOINCREMENT"
-    | .postgres => s!"{fieldDef.name}  {fieldDef.type} NOT NULL GENERATED BY DEFAULT AS IDENTITY"
+    | .sqlite => s!"{quoteIdent fieldDef.name}  INTEGER PRIMARY KEY AUTOINCREMENT"
+    | .postgres =>
+      s!"{quoteIdent fieldDef.name}  {fieldDef.type} NOT NULL GENERATED BY DEFAULT AS IDENTITY"
   else
     letI dflt := match fieldDef.default? with
       | some d => s!" DEFAULT {ColumnDefault.toString d}"
       | none => ""
-    s!"{fieldDef.name}  {fieldDef.type}{if not fieldDef.nullable then " NOT NULL" else ""}{dflt}"
+    -- The type is not an identifier: `varchar(20)` quoted would name a type nobody declared.
+    s!"{quoteIdent fieldDef.name}  {fieldDef.type}" ++
+      s!"{if not fieldDef.nullable then " NOT NULL" else ""}{dflt}"
 
 def FieldDef.fromColumn (column : Column) (name : String) : FieldDef where
   name := name
@@ -723,15 +755,16 @@ def CreateTable.toString (dialect : Dialect) (cmd : CreateTable) : String :=
   letI inlineKey := cmd.inlineKey dialect
   letI primaryKey : List String :=
     if cmd.primaryKey.isEmpty || inlineKey then []
-    else [s!"PRIMARY KEY ({", ".intercalate cmd.primaryKey})"]
+    else [s!"PRIMARY KEY ({", ".intercalate (cmd.primaryKey.map quoteIdent)})"]
   letI unique : List String := cmd.unique.map fun group =>
-    s!"UNIQUE ({", ".intercalate group})"
+    s!"UNIQUE ({", ".intercalate (group.map quoteIdent)})"
   letI foreignKeys : List String := cmd.foreignKeys.map fun fk =>
-    s!"FOREIGN KEY ({", ".intercalate fk.columns}) " ++
-      s!"REFERENCES {fk.foreignTable} ({", ".intercalate fk.foreignColumns}) " ++
+    s!"FOREIGN KEY ({", ".intercalate (fk.columns.map quoteIdent)}) " ++
+      s!"REFERENCES {quoteQualified fk.foreignTable} " ++
+      s!"({", ".intercalate (fk.foreignColumns.map quoteIdent)}) " ++
       s!"ON DELETE {fk.onDelete.sql} ON UPDATE {fk.onUpdate.sql}"
   letI entries := fields ++ primaryKey ++ unique ++ foreignKeys
-  s!"CREATE TABLE {cmd.tableName} (\n  {",\n  ".intercalate entries}\n)"
+  s!"CREATE TABLE {quoteQualified cmd.tableName} (\n  {",\n  ".intercalate entries}\n)"
 
 inductive AlterColumnCommand where
   | setType (type : String)
@@ -753,9 +786,10 @@ inductive AlterTableCommand where
 
 def AlterTableCommand.toString (dialect : Dialect) : AlterTableCommand → String
   | addColumn field => s!"ADD COLUMN {field.toString dialect}"
-  | renameColumn oldName newName => s!"RENAME COLUMN {oldName} TO {newName}"
-  | alterColumn name cmd => s!"ALTER COLUMN {name} {cmd.toString}"
-  | dropColumn name => s!"DROP COLUMN {name}"
+  | renameColumn oldName newName =>
+    s!"RENAME COLUMN {quoteIdent oldName} TO {quoteIdent newName}"
+  | alterColumn name cmd => s!"ALTER COLUMN {quoteIdent name} {cmd.toString}"
+  | dropColumn name => s!"DROP COLUMN {quoteIdent name}"
 
 def AlterTableCommand.fromTableOperation : TableOperation → List AlterTableCommand
   | .insert name col => [.addColumn (.fromColumn col name)]
@@ -773,7 +807,7 @@ structure AlterTable where
 
 def AlterTable.toString (dialect : Dialect) (cmd : AlterTable) : String :=
   letI commands : List String := cmd.commands.map (AlterTableCommand.toString dialect)
-  s!"ALTER TABLE {cmd.tableName}
+  s!"ALTER TABLE {quoteQualified cmd.tableName}
     {",\n".intercalate commands}
   "
 
@@ -807,18 +841,20 @@ structure DropTable where
   tableName : String
 
 def DropTable.toString (cmd : DropTable) : String :=
-  s!"DROP TABLE {cmd.tableName}"
+  s!"DROP TABLE {quoteQualified cmd.tableName}"
 
 structure RenameTable where
   oldName : String
   newName : String
 
+/-- The new name is a bare table name rather than a qualified one: `RENAME TO` moves no table
+between schemas, so a dot in it would be part of the name rather than a separator. -/
 def RenameTable.toString (cmd : RenameTable) : String :=
-  s!"ALTER TABLE {cmd.oldName} RENAME TO {cmd.newName}"
+  s!"ALTER TABLE {quoteQualified cmd.oldName} RENAME TO {quoteIdent cmd.newName}"
 
 /-- The SQL text of one key of an index: the column under its collation, then its direction. -/
 def indexKeyToString (key : IndexKey String) : String :=
-  s!"{collated key.collation key.column} {sortDirectionToString key.direction}"
+  s!"{collated key.collation (quoteIdent key.column)} {sortDirectionToString key.direction}"
 
 structure CreateIndex where
   indexName : String
@@ -829,13 +865,14 @@ structure CreateIndex where
 /-- Both backends spell this the same way, expression keys included, so this takes no dialect. -/
 def CreateIndex.toString (cmd : CreateIndex) : String :=
   letI keys := ", ".intercalate (cmd.keys.map indexKeyToString)
-  s!"CREATE {if cmd.unique then "UNIQUE " else ""}INDEX {cmd.indexName} ON {cmd.tableName} ({keys})"
+  s!"CREATE {if cmd.unique then "UNIQUE " else ""}INDEX {quoteIdent cmd.indexName} " ++
+    s!"ON {quoteQualified cmd.tableName} ({keys})"
 
 structure DropIndex where
   indexName : String
 
 def DropIndex.toString (cmd : DropIndex) : String :=
-  s!"DROP INDEX {cmd.indexName}"
+  s!"DROP INDEX {quoteIdent cmd.indexName}"
 
 /-- The statement one index operation is. -/
 def indexOperationToString : IndexOperation → String

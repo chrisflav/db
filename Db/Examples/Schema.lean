@@ -41,6 +41,54 @@ structure Tag where
   label : VarChar 50
   deriving Repr
 
+section Identifiers
+
+/-- A table that is nothing but awkward names: a mixed-case table name, a mixed-case column, and
+two columns that are reserved words on both backends.
+
+Every identifier the library emits is double-quoted, so `addedAt` stays `addedAt` rather than being
+folded to `addedat` by PostgreSQL, and `order` and `select` are names rather than syntax errors.
+Before the quoting, PostgreSQL introspection reported the folded name and `autoUpdate` proposed to
+add `addedAt` again on every run. -/
+@[model (dbName := "readingList") mydb]
+structure ReadingList where
+  /-- `ORDER` is a reserved word. -/
+  order : Int
+  /-- Mixed case, which is what PostgreSQL used to fold away. -/
+  addedAt : Int
+  /-- `SELECT` is a reserved word too. -/
+  «select» : Bool
+  /-- Character data, so that a case-insensitive index has something to be declared over. -/
+  bookTitle : VarChar 200
+  deriving Repr
+
+/-- The schema with two indexes over mixed-case columns, one of them case-insensitive. That is the
+round trip the quoting has to survive twice over: the index is declared as `lower("bookTitle")` and
+read back in whatever spelling the backend hands its definition out in.
+
+The whole of `mydb` rather than a database of its own: `autoUpdate` migrates a database to a target
+schema, so a target naming only this table would drop the tables of every other demo. The
+PostgreSQL demos share one database, and run in sequence. -/
+def readingListDb : DatabaseRecipe :=
+  (%database mydb).recipe.withIndexes "readingList" <| tableIndexes ReadingListIndex
+    [{ name := "idx_readingList_addedAt", keys := [{ column := .addedAt, direction := .desc }] },
+     { name := "idx_readingList_bookTitle",
+       keys := [{ column := .bookTitle, collation := .caseInsensitive }] }]
+
+def gatsby : ReadingList where
+  order := 1
+  addedAt := 20260101
+  «select» := true
+  bookTitle := v"The Great Gatsby"
+
+def moby : ReadingList where
+  order := 2
+  addedAt := 20260202
+  «select» := false
+  bookTitle := v"Moby-Dick"
+
+end Identifiers
+
 /-- The connection string the PostgreSQL examples use: `DB_POSTGRES_URL` if it is set, so that the
 suite can be pointed at another server or database, and the local test database otherwise. -/
 def postgresUrl : IO String := do

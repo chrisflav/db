@@ -171,7 +171,7 @@ of the `CREATE TABLE`, so it is read back from there; the word is matched as a w
 table or column whose name merely contains it is not mistaken for a generated key. -/
 def isAutoIncrement (tableName : String) : M Bool := do
   let rows ← query <|
-    s!"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{tableName}'"
+    s!"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = {SQL.quoteString tableName}"
   letI declaration := (rows[0]?.bind (·.text? "sql")).getD ""
   return containsWord declaration.toUpper "AUTOINCREMENT"
 
@@ -227,9 +227,11 @@ structure RebuildColumn where
 `source` is their own name (they all exist and their data must be preserved). -/
 def currentColumns (tableName : String) : M (Array RebuildColumn) := do
   let autoIncrement ← isAutoIncrement tableName
+  -- A pragma function takes the table name as a string literal, not as an identifier, so this is
+  -- the one family of sites that quotes with `quoteString` rather than `quoteIdent`.
   let rows ← query <|
     s!"SELECT name AS nm, type AS ty, [notnull] AS nn, pk, dflt_value AS dv " ++
-    s!"FROM pragma_table_info('{tableName}') ORDER BY cid"
+    s!"FROM pragma_table_info({SQL.quoteString tableName}) ORDER BY cid"
   let keySize := rows.filter (fun row => (row.textD "pk" "0").toNat?.getD 0 > 0) |>.size
   return rows.filterMap fun row =>
     match row.text? "nm", row.text? "ty" with
@@ -252,7 +254,7 @@ creates itself for a `PRIMARY KEY` or `UNIQUE` constraint have no statement of t
 listed here; see `unrecoverableConstraints`. -/
 def auxiliaryObjects (tableName : String) : M (Array String) := do
   let rows ← query <|
-    s!"SELECT sql FROM sqlite_master WHERE tbl_name = '{tableName}' " ++
+    s!"SELECT sql FROM sqlite_master WHERE tbl_name = {SQL.quoteString tableName} " ++
     "AND type IN ('index', 'trigger') AND sql IS NOT NULL"
   return rows.filterMap (·.text? "sql")
 
@@ -263,14 +265,14 @@ no statement of their own for `auxiliaryObjects` to re-run, and a rebuild has to
 again. -/
 def inlineUnique (tableName : String) : M (List (List String)) := do
   let indexRows ← query <|
-    s!"SELECT il.name AS nm FROM pragma_index_list('{tableName}') il " ++
+    s!"SELECT il.name AS nm FROM pragma_index_list({SQL.quoteString tableName}) il " ++
     "LEFT JOIN sqlite_master m ON m.name = il.name AND m.type = 'index' " ++
     "WHERE il.origin = 'u' AND m.sql IS NULL ORDER BY il.name"
   let mut res : List (List String) := []
   for indexRow in indexRows do
     let some indexName := indexRow.text? "nm" | continue
     let columnRows ← query <|
-      s!"SELECT name AS nm FROM pragma_index_info('{indexName}') ORDER BY seqno"
+      s!"SELECT name AS nm FROM pragma_index_info({SQL.quoteString indexName}) ORDER BY seqno"
     res := (columnRows.toList.filterMap (·.text? "nm")) :: res
   return res.reverse
 
@@ -296,7 +298,7 @@ def tableColumns (tableName : String) : M (Std.HashMap String Column × List Str
   let autoIncrement ← isAutoIncrement tableName
   let rows ← query <|
     s!"SELECT name AS nm, type AS ty, [notnull] AS nn, pk, dflt_value AS dv " ++
-    s!"FROM pragma_table_info('{tableName}') ORDER BY cid"
+    s!"FROM pragma_table_info({SQL.quoteString tableName}) ORDER BY cid"
   -- Whether the primary key is a single column decides whether it is the table's rowid.
   let keySize := rows.filter (fun row => (row.textD "pk" "0").toNat?.getD 0 > 0) |>.size
   let mut columns : Std.HashMap String Column := ∅
@@ -328,12 +330,13 @@ def tableColumns (tableName : String) : M (Std.HashMap String Column × List Str
 SQLite creates for the primary key has origin `pk` rather than `u` and is not one of them. -/
 def tableUnique (tableName : String) : M (List (List String)) := do
   let indexRows ← query <|
-    s!"SELECT name AS nm FROM pragma_index_list('{tableName}') WHERE origin = 'u' ORDER BY name"
+    s!"SELECT name AS nm FROM pragma_index_list({SQL.quoteString tableName}) " ++
+    "WHERE origin = 'u' ORDER BY name"
   let mut res : List (List String) := []
   for indexRow in indexRows do
     let some indexName := indexRow.text? "nm" | continue
     let columnRows ← query <|
-      s!"SELECT name AS nm FROM pragma_index_info('{indexName}') ORDER BY seqno"
+      s!"SELECT name AS nm FROM pragma_index_info({SQL.quoteString indexName}) ORDER BY seqno"
     res := (columnRows.toList.filterMap (·.text? "nm")) :: res
   return res.reverse
 
@@ -350,7 +353,7 @@ in the declared shape. -/
 def tableIndexes (tableName : String) : M (List (TableIndex String)) := do
   let rows ← query <|
     s!"SELECT name AS nm, sql AS ddl FROM sqlite_master WHERE type = 'index' " ++
-    s!"AND tbl_name = '{tableName.replace "'" "''"}' AND sql IS NOT NULL ORDER BY name"
+    s!"AND tbl_name = {SQL.quoteString tableName} AND sql IS NOT NULL ORDER BY name"
   return rows.toList.filterMap fun row => do
     let name ← row.text? "nm"
     let ddl ← row.text? "ddl"
@@ -361,7 +364,8 @@ column, which the `id` column groups into keys and `seq` orders within a key. -/
 def tableForeignKeys (tableName : String) : M (List (ForeignKey String)) := do
   let rows ← query <|
     s!"SELECT id, seq, [table] AS ftbl, [from] AS col, [to] AS fcol, on_delete AS od, " ++
-    s!"on_update AS ou FROM pragma_foreign_key_list('{tableName}') ORDER BY id, seq"
+    s!"on_update AS ou FROM pragma_foreign_key_list({SQL.quoteString tableName}) " ++
+    "ORDER BY id, seq"
   let mut byId : Std.HashMap String (ForeignKey String) := ∅
   let mut order : Array String := #[]
   for row in rows do
@@ -425,12 +429,12 @@ def rebuildTable (tableName : String) (commands : List AlterTableCommand) : M Un
     | _ => none
   let fieldDefs := newCols.toList.map fun c =>
     if inlineKey == some c.name then
-      s!"{c.name} INTEGER PRIMARY KEY AUTOINCREMENT"
+      s!"{SQL.quoteIdent c.name} INTEGER PRIMARY KEY AUTOINCREMENT"
     else
       letI dflt := match c.default? with
         | some d => s!" DEFAULT {SQL.ColumnDefault.toString d}"
         | none => ""
-      s!"{c.name} {c.type}{if c.notNull then " NOT NULL" else ""}{dflt}"
+      s!"{SQL.quoteIdent c.name} {c.type}{if c.notNull then " NOT NULL" else ""}{dflt}"
   -- A column the rebuild kept under the same name is still the one a foreign key refers to.
   let kept : Std.HashSet String := .ofList (newCols.toList.filterMap fun c =>
     if c.source == some c.name then some c.name else none)
@@ -440,19 +444,22 @@ def rebuildTable (tableName : String) (commands : List AlterTableCommand) : M Un
         s!"SQLite backend: cannot rebuild table `{tableName}`, as its constraint on " ++
         s!"({", ".intercalate columns}) names columns the migration renames or drops, so the " ++
         "rebuild would silently drop the constraint. Migrate this table by hand."
-  let uniqueDefs := unique.map fun columns => s!"UNIQUE ({", ".intercalate columns})"
+  let uniqueDefs := unique.map fun columns =>
+    s!"UNIQUE ({", ".intercalate (columns.map SQL.quoteIdent)})"
   let foreignKeyDefs := foreignKeys.map fun fk =>
-    s!"FOREIGN KEY ({", ".intercalate fk.columns}) " ++
-      s!"REFERENCES {fk.foreignTable} ({", ".intercalate fk.foreignColumns}) " ++
+    s!"FOREIGN KEY ({", ".intercalate (fk.columns.map SQL.quoteIdent)}) " ++
+      s!"REFERENCES {SQL.quoteQualified fk.foreignTable} " ++
+      s!"({", ".intercalate (fk.foreignColumns.map SQL.quoteIdent)}) " ++
       s!"ON DELETE {fk.onDelete.sql} ON UPDATE {fk.onUpdate.sql}"
   let constraints :=
     (if pkCols.isEmpty || inlineKey.isSome then []
-      else [s!"PRIMARY KEY ({", ".intercalate pkCols})"]) ++ uniqueDefs ++ foreignKeyDefs
+      else [s!"PRIMARY KEY ({", ".intercalate (pkCols.map SQL.quoteIdent)})"]) ++
+      uniqueDefs ++ foreignKeyDefs
   -- Columns present both before and after keep their data; match old name → new name.
   let copyPairs := newCols.toList.filterMap fun c => c.source.map (·, c.name)
-  let newNames := ", ".intercalate (copyPairs.map (·.2))
-  let oldNames := ", ".intercalate (copyPairs.map (·.1))
-  let tmp := s!"__db_migrate_{tableName}"
+  let newNames := ", ".intercalate (copyPairs.map (SQL.quoteIdent ·.2))
+  let oldNames := ", ".intercalate (copyPairs.map (SQL.quoteIdent ·.1))
+  let tmp := SQL.quoteIdent s!"__db_migrate_{tableName}"
   -- Foreign key enforcement has to be off across the rebuild: another table referencing this one
   -- would otherwise block the `DROP TABLE`, and its references would be rewritten to point at the
   -- temporary table by the rename. The pragma is a no-op inside a transaction, so it is set around
@@ -465,9 +472,11 @@ def rebuildTable (tableName : String) (commands : List AlterTableCommand) : M Un
     db.transaction do
       db.exec s!"CREATE TABLE {tmp} (\n  {",\n  ".intercalate (fieldDefs ++ constraints)}\n)"
       unless copyPairs.isEmpty do
-        db.exec s!"INSERT INTO {tmp} ({newNames}) SELECT {oldNames} FROM {tableName}"
-      db.exec s!"DROP TABLE {tableName}"
-      db.exec s!"ALTER TABLE {tmp} RENAME TO {tableName}"
+        db.exec <|
+          s!"INSERT INTO {tmp} ({newNames}) SELECT {oldNames} " ++
+          s!"FROM {SQL.quoteQualified tableName}"
+      db.exec s!"DROP TABLE {SQL.quoteQualified tableName}"
+      db.exec s!"ALTER TABLE {tmp} RENAME TO {SQL.quoteIdent tableName}"
       for sql in aux do
         db.exec sql
     if enforcing then
@@ -538,6 +547,6 @@ instance : DBMonadWithMigrations M where
         rebuildTable cmd.tableName cmd.commands
       else
         for command in cmd.commands do
-          db.exec s!"ALTER TABLE {cmd.tableName} {command.toString .sqlite}"
+          db.exec s!"ALTER TABLE {SQL.quoteQualified cmd.tableName} {command.toString .sqlite}"
 
 end Sqlite
