@@ -812,6 +812,22 @@ def conflictDemo : Sqlite.M Unit := do
   IO.println <|
     s!"The row was overwritten: body={rows[0]!.textD "body" "?"}, " ++
     s!"state={rows[0]!.textD "state" "?"} (untouched, not in the set list)"
+  -- An insert that supplies no column at all is `DEFAULT VALUES`, which SQLite lets no
+  -- `ON CONFLICT` follow, so `.ignore` is spelled `INSERT OR IGNORE` there. Two such rows conflict
+  -- with each other on the `UNIQUE (body, state)` group, since both take the same defaults.
+  let blank : (noteDb).Insert NoteDbIndex.note := { value := fun _ => none }
+  IO.println <|
+    s!"SQL: {(SQL.Insert.fromInsert { blank with onConflict := .ignore }).toString .sqlite}"
+  DBMonad.insert (d := noteDb) blank
+  let ignoredBlank ← DBMonad.insertReturning (d := noteDb) { blank with onConflict := .ignore }
+  IO.println s!"Rows stored by the second all-defaults insert: {ignoredBlank.size}"
+  -- `DO UPDATE` has no spelling after `DEFAULT VALUES` at all, so the backend says so rather than
+  -- sending SQLite a statement it will reject.
+  try
+    DBMonad.insert (d := noteDb) { blank with onConflict := .update [.id] [.body] }
+    IO.println "  an upserting all-defaults insert was accepted, which it should not be."
+  catch e =>
+    IO.println s!"  refused, as expected: {e}"
 
 /-- Exercise the left outer join: every book, with its author's row where there is one and `NULL`
 throughout the author's columns where there is not. -/

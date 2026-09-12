@@ -513,12 +513,43 @@ def returningClause (columns : List String) : String :=
 def columnNames {d : Database} (tableName : d.Index) : List String :=
   (Enum.all (d.tables tableName).Index).toList.map ToString.toString
 
-def Insert.toString (ins : Insert) : String :=
+/-- Why SQLite cannot run this insert, if it cannot.
+
+SQLite parses `ON CONFLICT` only after a `VALUES` or a `SELECT`, never after `DEFAULT VALUES`, so
+an insert that supplies no column and resolves its conflicts by updating has no spelling there at
+all: `INSERT OR REPLACE` deletes the conflicting row and inserts a new one rather than assigning
+the listed columns of the old one, which is a different statement. Reported rather than rendered
+into SQL the database would reject, and rather than silently run as something else. -/
+def Insert.sqliteError? (ins : Insert) : Option String :=
+  match ins.values.isEmpty, ins.onConflict with
+  | true, .update _ (_ :: _) =>
+    some <|
+      s!"the insert into `{ins.intoTable}` supplies no column, so it has to be written " ++
+      "`DEFAULT VALUES`, and SQLite accepts no `ON CONFLICT ... DO UPDATE` after that. Supply " ++
+      "at least one column, or use `.ignore`."
+  | _, _ => none
+
+/-- The statement, in `dialect`.
+
+The dialect is needed only for an insert that supplies no column: `DEFAULT VALUES` followed by
+`ON CONFLICT DO NOTHING` is a syntax error on SQLite (`near "ON"`) and accepted by PostgreSQL, so
+SQLite gets its own `INSERT OR IGNORE` for that one case. The two are not the same statement in
+general — `OR IGNORE` skips a row violating any constraint, `DO NOTHING` only one violating a
+uniqueness constraint — but a row that supplies no column at all has nothing to violate a `CHECK`
+or a `NOT NULL` with that its defaults do not already decide. -/
+def Insert.toString (dialect : Dialect) (ins : Insert) : String :=
   -- An insert that supplies no column at all has to be written `DEFAULT VALUES`; the empty column
   -- and value lists are a syntax error.
   if ins.values.isEmpty then
-    s!"INSERT INTO {quoteQualified ins.intoTable} DEFAULT VALUES" ++
-      ins.onConflict.toString ++ returningClause ins.returning
+    letI ignoring :=
+      dialect == .sqlite &&
+        match ins.onConflict with
+        | .ignore => Bool.true
+        | .update _ [] => Bool.true
+        | _ => Bool.false
+    letI conflict := if ignoring then "" else ins.onConflict.toString
+    s!"INSERT {if ignoring then "OR IGNORE " else ""}INTO {quoteQualified ins.intoTable} " ++
+      s!"DEFAULT VALUES{conflict}" ++ returningClause ins.returning
   else
     letI columns := ", ".intercalate (ins.values.map fun x => quoteIdent x.1)
     letI values := ", ".intercalate (ins.values.map fun x => x.2.toString)

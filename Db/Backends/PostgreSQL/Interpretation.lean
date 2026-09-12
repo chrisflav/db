@@ -92,10 +92,10 @@ instance (d : Database) : DBMonad d M where
     decodeRows view (← rowsOf sql.toString)
   insert {table} data := do
     let sql : SQL.Insert := .fromInsert data
-    _ ← execCounting sql.toString
+    _ ← execCounting (sql.toString .postgres)
   insertReturning {table} data := do
     let sql : SQL.Insert := { SQL.Insert.fromInsert data with returning := SQL.columnNames table }
-    decodeRows (Table.view table) (← rowsOf sql.toString)
+    decodeRows (Table.view table) (← rowsOf (sql.toString .postgres))
   update {table} upd := do
     let sql : SQL.Update := .fromUpdate upd
     -- An `UPDATE` with no assignment is not a statement; it also changes nothing.

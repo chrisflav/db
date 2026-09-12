@@ -104,10 +104,14 @@ instance (d : Database) : DBMonad d M where
   insert {table} data := do
     let db ← read
     let sql : SQL.Insert := .fromInsert data
-    db.exec sql.toString
+    if let some reason := sql.sqliteError? then
+      throw <| IO.userError s!"SQLite backend: {reason}"
+    db.exec (sql.toString .sqlite)
   insertReturning {table} data := do
     let sql : SQL.Insert := { SQL.Insert.fromInsert data with returning := SQL.columnNames table }
-    decodeRows (Table.view table) (← query sql.toString)
+    if let some reason := sql.sqliteError? then
+      throw <| IO.userError s!"SQLite backend: {reason}"
+    decodeRows (Table.view table) (← query (sql.toString .sqlite))
   update {table} upd := do
     let db ← read
     let sql : SQL.Update := .fromUpdate upd

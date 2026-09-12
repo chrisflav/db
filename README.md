@@ -652,6 +652,13 @@ backends have — SQLite since 3.24, so its own `INSERT OR IGNORE` is not needed
 serves both. `DO UPDATE` needs a conflict target on both: neither will guess which constraint an
 update is meant to resolve.
 
+One exception: an insert that supplies no column at all has to be written `INSERT INTO t DEFAULT
+VALUES`, and SQLite lets no `ON CONFLICT` follow that. `.ignore` is therefore rendered as
+`INSERT OR IGNORE INTO t DEFAULT VALUES` there, which for a row that carries no value of its own
+means the same thing; `.update` has no spelling at all in that position, and the SQLite backend
+reports it rather than emitting SQL the database would reject. Supply at least one column if you
+need to upsert.
+
 A skipped row is a row the statement did not store, so `insertReturning` on an `.ignore` insert
 returns no rows rather than the row that was already there.
 
