@@ -148,6 +148,9 @@ def extendTest : IO Unit := do
     IO.println "Authors over 50 in ten years (PostgreSQL):"
     for row in ← DBMonad.lookup over50 do
       IO.println s!"  {row.value (Sum.inl AuthorIndex.name)}: {row.value (Sum.inr ⟨⟩)}"
+  match ← PostgreSQL.runDB (← postgresUrl) x with
+  | .error e => IO.println s!"Error occured: {repr e}."
+  | .ok _ => pure ()
 
 /-- The declarative migrations against a real server.
 
