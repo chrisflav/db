@@ -461,6 +461,18 @@ def indexDemo : Sqlite.M Unit := do
   IO.println <|
     s!"A hand-made index survives autoUpdate: {handmade[0]!.textD "n" "?"} " ++
     s!"(and provoked {stillThere} operations)"
+  -- PostgreSQL reports an ascending key without the `ASC` it was given, so the whole of such a
+  -- key's text is the column name and the direction keywords are only recognised when a separator
+  -- puts them outside it. Without that a column called `basc` reads back as `b` and its index
+  -- never converges. The parser is shared, so SQLite is where it is cheapest to check.
+  let parsed : String → String := fun sql =>
+    match SQL.Migration.parseCreateIndex? "i" sql with
+    | some idx => ", ".intercalate (idx.keys.map fun k => s!"{k.column} {repr k.direction}")
+    | none => "(unparsed)"
+  IO.println s!"PostgreSQL spelling `(basc)`: {parsed "CREATE INDEX i ON t USING btree (basc)"}"
+  IO.println <|
+    s!"PostgreSQL spelling `(recdesc DESC)`: " ++
+    s!"{parsed "CREATE INDEX i ON t USING btree (recdesc DESC)"}"
 
 /-- The same schema with a different `UNIQUE` constraint, to migrate towards. -/
 def noteDbAltered : DatabaseRecipe where
@@ -799,6 +811,7 @@ def conflictDemo : Sqlite.M Unit := do
   IO.println <|
     s!"The row was overwritten: body={rows[0]!.textD "body" "?"}, " ++
     s!"state={rows[0]!.textD "state" "?"} (untouched, not in the set list)"
+
 /-- Exercise the left outer join: every book, with its author's row where there is one and `NULL`
 throughout the author's columns where there is not. -/
 def leftJoinDemo : Sqlite.M Unit := do
@@ -819,6 +832,7 @@ def leftJoinDemo : Sqlite.M Unit := do
     letI title := row.value (Sum.inl BookIndex.title)
     letI age := row.value (Sum.inr AuthorIndex.age)
     IO.println s!"  {title} — author age {age}"
+
 /-- Exercise the correlated scalar subquery: every author, with the number of books they wrote,
 counted by a subquery rather than by a join that would drop the authors who wrote none. -/
 def correlateDemo : Sqlite.M Unit := do
@@ -872,6 +886,49 @@ def extendDemo : Sqlite.M Unit := do
     IO.println <|
       s!"  {row.value (Sum.inl AuthorIndex.name)}: " ++
       s!"{row.value (Sum.inl AuthorIndex.age)} -> {row.value (Sum.inr ⟨⟩)}"
+  -- Filtering on the computed column. It has to be filtered from outside the select that computes
+  -- it: the condition names the alias, and an alias of the same `SELECT` list is in scope in a
+  -- `WHERE` on SQLite but not on PostgreSQL. The extra subquery in the SQL is that.
+  let over50 : Query (%database mydb) _ :=
+    .filter (.gt (.var (Sum.inr (⟨⟩ : IUnit "age_in_10")) .int) (.int 50)) inTenYears
+  IO.println s!"SQL: {(SQL.Select.fromQuery over50).toString}"
+  IO.println "Those over 50 by then:"
+  for row in ← DBMonad.lookup over50 do
+    IO.println s!"  {row.value (Sum.inl AuthorIndex.name)}: {row.value (Sum.inr ⟨⟩)}"
+
+section ModelConflicts
+
+-- A second database, so that the demos above keep the schema they had.
+initialize_database labeldb
+
+/-- A label, keyed by its name rather than by a generated id, so that an insert carries the column
+a conflict is decided on. -/
+@[model (dbName := "label") labeldb]
+structure Label where
+  name : VarChar 50
+  colour : VarChar 20
+  deriving Repr
+
+/-- `name` is unique, by an index declared on the recipe: `@[model]` generates no indexes, and an
+`AutoKey` would be no use here — the database assigns it, so the insert leaves it out and no row
+ever conflicts on it. -/
+def labelDb : DatabaseRecipe :=
+  (%database labeldb).recipe.withIndexes "label" <| tableIndexes LabelIndex
+    [{ name := "idx_label_name", keys := [{ column := .name }], unique := true }]
+
+/-- Exercise the model-level conflict helpers against a key the row actually carries. -/
+def modelConflictDemo : Sqlite.M Unit := do
+  autoUpdate labelDb
+  let first ← HasModel.insertIfAbsent ({ name := v"urgent", colour := v"red" } : Label)
+  let again ← HasModel.insertIfAbsent ({ name := v"urgent", colour := v"green" } : Label)
+  IO.println s!"insertIfAbsent, then the same label again: {first}, {again}"
+  let rows ← HasModel.upsert ({ name := v"urgent", colour := v"blue" } : Label)
+    [LabelIndex.name] [LabelIndex.colour]
+  IO.println <|
+    s!"upsert stored {rows.size} row(s), colour now " ++
+    s!"{(rows[0]?.map (·.colour.val)).getD "?"}"
+
+end ModelConflicts
 
 /-- Run both demos against a fresh in-memory SQLite database. -/
 def test : IO Unit := do
@@ -887,8 +944,8 @@ def test : IO Unit := do
   Sqlite.runDB ":memory:" indexDemo
   Sqlite.runDB ":memory:" conflictDemo
   Sqlite.runDB ":memory:" leftJoinDemo
-
   Sqlite.runDB ":memory:" extendDemo
   Sqlite.runDB ":memory:" correlateDemo
+  Sqlite.runDB ":memory:" modelConflictDemo
 
 end SqliteExample

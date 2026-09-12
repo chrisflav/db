@@ -419,6 +419,16 @@ def elabQueryDo : TermElab := fun stx expectedType? => do
           throwErrorAt c m!"`order_by` can only sort by a column of \
             `{binders[bidx]!.name}`, the table given to `select`"
         let ctor ← columnCtor ctx kidx (Name.mkSimple e.getAppFn.constName!.getString!)
+        -- `nocase` is emitted as `lower(...)`, a function on character data. On a number SQLite
+        -- silently orders the text it folds to — `9` after `74` — and PostgreSQL has no
+        -- `lower(integer)` at all and fails when the query runs. Here is the only place the
+        -- column's type is still around to reject it.
+        if nocase then
+          let t ← reduce (← mkAppM ``Column.type
+            #[← mkAppM ``Database.Name.column #[← mkAppM ``View.name #[selView, ctor]]])
+          unless (← reduce (← mkAppM ``DBType.isTextLike #[t])).isConstOf ``Bool.true do
+            throwErrorAt c m!"`nocase` orders by `lower(...)`, which needs character data, but \
+              `{c}` has type `{t}`"
         let dir := Lean.mkConst (if desc then ``SortDirection.desc else ``SortDirection.asc)
         let coll := Lean.mkConst
           (if nocase then ``Collation.caseInsensitive else ``Collation.binary)

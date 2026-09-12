@@ -118,6 +118,29 @@ def correlateTest : IO Unit := do
   | .error e => IO.println s!"Error occured: {repr e}."
   | .ok _ => pure ()
 
+/-- A computed column, filtered on. PostgreSQL is the backend that has anything to say here: a
+`WHERE` naming an alias of its own `SELECT` list is an SQLite extension and a plain error on
+PostgreSQL, so the condition has to be applied to a select that already exposes the computed
+column. -/
+def extendTest : IO Unit := do
+  let x : PostgreSQL.M Unit := do
+    autoUpdate (%database mydb)
+    let _ ← HasModel.delete (α := Author) .true
+    insert mike
+    insert lisa
+    let inTenYears : Query (%database mydb) _ :=
+      .extend "age_in_10" { type := .int, nullable := false }
+        (.add (.var AuthorIndex.age .int) (.int 10))
+        (.all (HasModel.model Author).index)
+    let over50 : Query (%database mydb) _ :=
+      .filter (.gt (.var (Sum.inr (⟨⟩ : IUnit "age_in_10")) .int) (.int 50)) inTenYears
+    IO.println "Authors over 50 in ten years (PostgreSQL):"
+    for row in ← DBMonad.lookup over50 do
+      IO.println s!"  {row.value (Sum.inl AuthorIndex.name)}: {row.value (Sum.inr ⟨⟩)}"
+  match ← PostgreSQL.runDB (← postgresUrl) x with
+  | .error e => IO.println s!"Error occured: {repr e}."
+  | .ok _ => pure ()
+
 def test : IO Unit := do
   let x : PostgreSQL.M (Array Book) := do
     -- Update database schema to target schema

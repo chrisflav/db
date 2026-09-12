@@ -92,6 +92,17 @@ example : QuerySet Author := query% do
   guard a.age + 1 > (5 : Int)
   select a
 
+-- `nocase` is `lower(...)`, so it needs a character column. SQLite would quietly sort the text a
+-- number folds to and PostgreSQL has no `lower(integer)` at all, so the elaborator rejects it.
+/--
+error: `nocase` orders by `lower(...)`, which needs character data, but `a.age` has type `DBType.int`
+-/
+#guard_msgs in
+example : QuerySet Author := query% do
+  let a ← from Author
+  select a
+  order_by a.age nocase
+
 end DSLChecks
 
 end BookExample

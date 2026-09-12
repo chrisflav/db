@@ -335,18 +335,6 @@ attribute [instance] Table.indexing
 structure Table.Entry (table : Table) : Type where
   value (idx : table.Index) : (table.columns idx).Value
 
-/-- The same table with a different set of indexes. -/
-def Table.withIndexes (t : Table) (indexes : List (TableIndex t.Index)) : Table :=
-  { t with indexes := indexes }
-
-/-- The entries of a table do not depend on its indexes: an index is a way of reaching a row, not
-part of what a row is. This is what carries a `HasTable` instance over to a table that has just
-been given indexes. -/
-def Table.entryWithIndexesEquiv (t : Table) (indexes : List (TableIndex t.Index)) :
-    t.Entry ≃ (t.withIndexes indexes).Entry where
-  toFun e := ⟨e.value⟩
-  invFun e := ⟨e.value⟩
-
 structure Database where
   Index : Type
   [indexing : Indexing Index]

@@ -407,13 +407,31 @@ IO.println s!"the database assigned id {tag.id}"
 An insert can say what to do with a row it cannot store because storing it would violate a
 uniqueness constraint — a primary key, a `UNIQUE` group, or a unique index:
 
-```lean
--- Skip the row if one conflicting with it is already there. Returns whether it was inserted.
-let stored ← HasModel.insertIfAbsent ({ id := 0, label := v"urgent" } : Tag)
+```lean4
+/-- A label, keyed by its name rather than by a generated id. -/
+@[model (dbName := "label") mydb]
+structure Label where
+  name : VarChar 50
+  colour : VarChar 20
 
--- Or overwrite: on a conflict on `id`, set `label` to the value this insert carried.
-let rows ← HasModel.upsert ({ id := 1, label := v"urgent" } : Tag) [.id] [.label]
+/-- `name` is unique, declared as a unique index on the recipe — see Indexes above. -/
+def labelDb : DatabaseRecipe :=
+  (%database mydb).recipe.withIndexes "label" <| tableIndexes LabelIndex
+    [{ name := "idx_label_name", keys := [{ column := .name }], unique := true }]
+
+-- Skip the row if one conflicting with it is already there. Returns whether it was inserted.
+let stored ← HasModel.insertIfAbsent ({ name := v"urgent", colour := v"red" } : Label)
+
+-- Or overwrite: on a conflict on `name`, set `colour` to the value this insert carried.
+let rows ← HasModel.upsert ({ name := v"urgent", colour := v"blue" } : Label)
+  [LabelIndex.name] [LabelIndex.colour]
 ```
+
+The conflict has to be one the row can actually have. A column whose value the database generates
+— an `AutoKey`, say — is left out of the statement so that the database can assign it, which also
+means no row ever conflicts on it: `insertIfAbsent` on a model whose only key is an `AutoKey`
+stores its row every time and always returns `true`. `target` and `set` have the model's index
+type, which a bare `.name` cannot be resolved against, so they are written out in full.
 
 On a `Database.Insert` this is the `onConflict` field, `.error` (the default), `.ignore`, or
 `.update target set`. It is emitted as `ON CONFLICT ... DO NOTHING`/`DO UPDATE`, which both

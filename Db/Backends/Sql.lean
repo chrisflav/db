@@ -92,6 +92,12 @@ structure Select where
   would be applied before the aggregation and would refer to columns the aggregate no longer has.
   Note that an aggregation without a `GROUP BY` is still one. -/
   isAggregate : Bool := false
+  /-- Whether the selector computes a column rather than only naming one, as `Query.extend` and
+  `Query.correlate` do. A `WHERE` cannot be merged into such a select either: it would have to name
+  the alias the computed column is given in the same `SELECT` list, which SQLite allows as an
+  extension and PostgreSQL rejects outright. Wrapping the select first gives the condition a
+  subquery that really exposes the column. -/
+  computesColumns : Bool := false
 
 end
 
@@ -304,9 +310,12 @@ partial def Select.fromQuery {d : Database} {view : View d} (q : Query d view)
   | .filter e q =>
     letI inner := Select.fromQuery q within emb
     -- A `WHERE` merged into a select that limits or groups its rows would be applied before the
-    -- limit or the grouping rather than after it, so such a select becomes a subquery first.
+    -- limit or the grouping rather than after it, so such a select becomes a subquery first. The
+    -- same for one whose `SELECT` list computes a column: the condition may name that column, and
+    -- an alias of the same select list is not in scope in a `WHERE` on PostgreSQL.
     letI s :=
-      if inner.limit.isSome || inner.offset.isSome || inner.isAggregate then inner.wrap else inner
+      if inner.limit.isSome || inner.offset.isSome || inner.isAggregate || inner.computesColumns
+        then inner.wrap else inner
     -- TODO: the names in the condition need to be fixed
     { s with condition := .and s.condition (Expr.fromExpr e) }
   | .join (s := view₁) (t := view₂) q₁ q₂ =>
@@ -373,7 +382,8 @@ partial def Select.fromQuery {d : Database} {view : View d} (q : Query d view)
             (s!"{emb.map (Sum.inl idx)}", Expr.var (view.alias idx))) ++
           [(s!"{emb.map (Sum.inr ⟨⟩)}", Expr.fromExpr e)]
       from_ := .select inner none
-      condition := .true }
+      condition := .true
+      computesColumns := true }
   | .correlate (outer := outer) (inner := inner) name q sub on agg _ =>
     -- The two sides are aliased through `outer.prod inner`, which is the view `on` is written
     -- over: the outer rows come back as `left__*` and the subquery's as `right__*`, so the
@@ -401,7 +411,8 @@ partial def Select.fromQuery {d : Database} {view : View d} (q : Query d view)
               Expr.var ((outer.prod inner).alias (Sum.inl idx)))) ++
           [(s!"{emb.map (Sum.inr ⟨⟩)}", .scalar scalarSelect)]
       from_ := .select outerSelect none
-      condition := .true }
+      condition := .true
+      computesColumns := true }
   | .aggregate (out := out) a q =>
     letI inner : Select := Select.fromQuery q
     { selector :=
@@ -887,6 +898,19 @@ private def endsWithCI (cs : List Char) (suffix : String) : Bool :=
   letI s := suffix.toList.map Char.toLower
   cs.length ≥ s.length && (cs.drop (cs.length - s.length)).map Char.toLower == s
 
+/-- Whether `cs` ends with `suffix` as a word of its own, i.e. with whitespace in front of it.
+
+A plain `endsWithCI` is not enough for the keywords of a key: PostgreSQL reports an ascending key
+without the `ASC` it was declared with, so the whole of such a key's text is the column name, and
+`endsWithCI ... "asc"` then takes the tail off a column called `basc` (and `"desc"` off one called
+`recdesc`). The index would be read back over a column the table does not have, and `autoUpdate`
+would drop and re-create it on every run instead of converging. -/
+private def endsWithWordCI (cs : List Char) (suffix : String) : Bool :=
+  endsWithCI cs suffix &&
+    match cs[cs.length - suffix.length - 1]? with
+    | some c => c.isWhitespace
+    | none => false
+
 /-- Whether `cs` starts with `prefix'`, ignoring case. -/
 private def startsWithCI (cs : List Char) (prefix' : String) : Bool :=
   letI s := prefix'.toList.map Char.toLower
@@ -909,12 +933,12 @@ private def parseIndexKey? (cs : List Char) : Option (IndexKey String) := Id.run
   let mut direction := SortDirection.asc
   -- PostgreSQL reports the null placement the direction already implies; it says nothing extra.
   for suffix in ["nulls first", "nulls last"] do
-    if endsWithCI text suffix then
+    if endsWithWordCI text suffix then
       text := trimChars (text.take (text.length - suffix.length))
-  if endsWithCI text "desc" then
+  if endsWithWordCI text "desc" then
     direction := .desc
     text := trimChars (text.take (text.length - 4))
-  else if endsWithCI text "asc" then
+  else if endsWithWordCI text "asc" then
     text := trimChars (text.take (text.length - 3))
   if startsWithCI text "lower(" && text.getLast? == some ')' then
     let inner := normalizeIdent (text.drop 6 |>.take (text.length - 7))
