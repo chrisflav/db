@@ -5,6 +5,9 @@ is backend and SQL independent. To give a brief impression, the following is an 
 
 ```lean4
 import Db
+-- The example ends on a PostgreSQL connection, and the PostgreSQL backend is not part of `Db`;
+-- see "The PostgreSQL backend" below for the import and the Lake option it needs.
+import Db.Postgres
 
 initialize_database mydb
 
@@ -515,8 +518,15 @@ drops the old table. `PRAGMA foreign_keys` is a no-op inside a transaction — a
 which is the same transaction as far as it is concerned — so the enforcement would stay on and the
 `DROP TABLE` would perform an implicit `DELETE` that fires the `ON DELETE` actions of every table
 referencing this one. The backend therefore refuses to rebuild inside a transaction, before it has
-done anything, and says so. A migration containing an `alterColumn` that is to be applied to SQLite
-declares
+done anything, and says so.
+
+The same rebuild is how SQLite realises an `ADD COLUMN` it rejects outright: a `NOT NULL` column
+whose default is missing or `NULL`, or a column with a non-constant default. That matters because
+`ADD COLUMN` of a `NOT NULL` column is exactly what `makemigrations` writes for a new non-optional
+field of a model, so the rule is not only about `alterColumn`. `render` puts its comment above any
+plan containing either kind of step.
+
+A migration containing such a step that is to be applied to SQLite declares
 
 ```lean
   atomic := false

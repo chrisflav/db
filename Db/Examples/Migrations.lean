@@ -274,6 +274,38 @@ def migrationsDemo {m : Type → Type} [Monad m] [DBMonadWithMigrations m] [DBMo
       s!"  mentions addColumn/createTable/dropIndex: " ++
       s!"{occurs source ".addColumn"}/{occurs source ".createTable"}/{occurs source ".dropIndex"}"
 
+/-- The renames whose effect on the folded schema is the whole point of this demo: a column another
+table's foreign key points at, a column an index is over, and the table itself. Both backends carry
+the new name into the constraints, the index definitions and the foreign keys of every other table
+when they perform the rename, so the schema the migrations fold to has to do the same. -/
+def renameMigration : Migration where
+  name := "0100_renames"
+  steps :=
+    [ .renameColumn "mig_book" "year" "published",
+      .renameColumn "mig_author" "name" "fullName",
+      .renameTable "mig_author" "mig_writer" ]
+
+/-- Apply `renameMigration` on top of `base` and compare the fold with the database again.
+
+Separate from `migrationsDemo` because the interesting number is the one after the renames: a fold
+that renamed only the key of the column map would leave the primary key, the foreign key and the
+index over the renamed column pointing at names that no longer exist, and the difference it then
+reports is one no migration can close. -/
+def renameDemo {m : Type → Type} [Monad m] [DBMonadWithMigrations m] [DBMonadTransactional m]
+    [MonadLiftT IO m] (base : List Migration) : m Unit := do
+  let all := base ++ [renameMigration]
+  IO.println s!"  renames applied: {← Db.Migration.migrate all 1700000100}"
+  let folded ← match Migration.foldAll all with
+    | .ok recipe => pure recipe
+    | .error e => DBMonadWithMigrations.abort e
+  let current ← DBMonadWithMigrations.currentDatabase
+  let mine : DatabaseRecipe :=
+    { tables := current.tables.filter fun name _ => folded.tables.contains name }
+  IO.println <|
+    s!"  after the renames — column operations: {(mine.operations folded).size}, " ++
+    s!"constraint mismatches: {mine.constraintMismatches folded}, " ++
+    s!"index operations: {(mine.declaredIndexOperations folded).size}"
+
 /-- Record a migration the code does not declare, which is the state `migrate` refuses to run in:
 the database is then ahead of the code, and applying the rest on top of a history nobody has would
 leave a schema no code describes. -/

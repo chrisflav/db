@@ -12,8 +12,8 @@ A module of its own, holding nothing but the `SQL.Dialect` enumeration.
 It used to live in `Db.Backends.Sql`, where the statements that depend on it are rendered. It
 cannot stay there now that `DBMonadWithMigrations` reports the dialect its backend speaks: that
 class is in `Db.Interpretation.Basic`, which `Db.Backends.Sql` imports, so naming `Dialect` from
-the class would close a cycle. The alternative â a `String` on the class, parsed back where a
-statement is rendered â would turn a closed two-case match into a partial one, so the enumeration
+the class would close a cycle. The alternative — a `String` on the class, parsed back where a
+statement is rendered — would turn a closed two-case match into a partial one, so the enumeration
 moved instead.
 -/
 

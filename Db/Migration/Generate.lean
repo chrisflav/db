@@ -200,19 +200,21 @@ def identifierOfName (name : String) : String :=
 /-- Lean source for a migration named `name` with these steps: a complete module, ready to be
 written to a file, compiled and committed.
 
-Two comments may be emitted above the list. A column `alter` step rebuilds the table on SQLite,
-which cannot happen inside a transaction there, so the migration may have to be `atomic := false` —
-may, because it depends on the backend it is applied to, which the generator does not know, so it
-says so and leaves `atomic` at its default rather than deciding for the reader. And a `run` step,
-being arbitrary Lean code, cannot be printed at all; that only arises when `render` is called on a
-hand-built list, never on a plan, but it is reported rather than dropped in silence. -/
+Two comments may be emitted above the list. A step SQLite realises by rebuilding the table — a
+column `alter`, or an `ADD COLUMN` of a `NOT NULL` column without a constant default, which is what
+a new non-optional model field plans to — cannot happen inside a transaction there, so the
+migration may have to be `atomic := false`; may, because it depends on the backend it is applied
+to, which the generator does not know, so it says so and leaves `atomic` at its default rather than
+deciding for the reader. And a `run` step, being arbitrary Lean code, cannot be printed at all;
+that only arises when `render` is called on a hand-built list, never on a plan, but it is reported
+rather than dropped in silence. -/
 def render (name : String) (steps : List Step) : String :=
   letI entries := steps.filterMap Source.step
   letI notes :=
     (if steps.any Step.needsTableRebuildOnSqlite then
-      ["  -- A column type or nullability change rebuilds the table on SQLite, which cannot run",
-       "  -- inside a transaction there; set `atomic := false` if this migration is applied to",
-       "  -- SQLite."]
+      ["  -- A column type or nullability change, and adding a `NOT NULL` column without a",
+       "  -- constant default, rebuild the table on SQLite, which cannot run inside a transaction",
+       "  -- there; set `atomic := false` if this migration is applied to SQLite."]
     else []) ++
     (if entries.length < steps.length then
       ["  -- One or more code steps were left out: a `Step.run` step is arbitrary Lean code and",

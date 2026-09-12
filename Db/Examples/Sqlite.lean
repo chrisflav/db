@@ -983,6 +983,17 @@ def migrationsDemo : Sqlite.M Unit := do
     s!"  mig_book.year is now " ++
     s!"{repr ((current.tables["mig_book"]?.bind (·.columns["year"]?)).map (·.type))}"
   IO.println s!"  rows preserved across the rebuild: {(← query "SELECT * FROM mig_book").size}"
+  -- SQLite realises an `ADD COLUMN` of a `NOT NULL` column without a default by a rebuild too, and
+  -- that is the step `makemigrations` writes for a new non-optional model field, so the comment
+  -- `render` puts above the plan has to cover it as well as `alterColumn`.
+  let notNullPlan :=
+    Db.Migration.render "0005_x"
+      [.addColumn "mig_book" "sold" { type := .int, nullable := false }]
+  IO.println <|
+    s!"  render warns about a NOT NULL addColumn: " ++
+    s!"{MigrationExample.occurs notNullPlan "atomic := false"}"
+  MigrationExample.renameDemo (MigrationExample.migrations ++ [yearAsText false])
+
 /-- Exercise identifier quoting: a table whose name and columns are mixed-case and include two
 reserved words. Everything the library emits is double-quoted, so the names survive as declared and
 `autoUpdate` converges — which is the point of the quoting, and what PostgreSQL used to fail at
@@ -1030,6 +1041,10 @@ def identifierDemo : Sqlite.M Unit := do
   IO.println <|
     s!"PostgreSQL spelling `lower((\"title\")::text)`: " ++
     s!"{parsed "CREATE INDEX i ON t USING btree (lower((\"title\")::text))"}"
+  -- A double quote inside a name is written twice inside the quotes, and has to be read back as
+  -- one, or the name parsed out is not the name that was declared and the index never converges.
+  IO.println <|
+    s!"a doubled quote inside the name: {parsed "CREATE INDEX i ON t (\"a\"\"b\" ASC)"}"
 
 /-- Run both demos against a fresh in-memory SQLite database. -/
 def test : IO Unit := do

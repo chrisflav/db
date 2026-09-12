@@ -459,7 +459,9 @@ inductive ConflictClause where
   | update (target : List String) (set : List String)
 
 /-- The `ON CONFLICT` clause, which both backends spell the same way — SQLite has had it since
-3.24, so its own `INSERT OR IGNORE` is not needed and one spelling serves both.
+3.24, so its own `INSERT OR IGNORE` is not needed and one spelling serves both. The one place that
+does not hold is an insert with no columns, where SQLite lets nothing follow `DEFAULT VALUES`;
+`Insert.toString` handles that case itself and does not come here.
 
 `DO UPDATE` with nothing to set is `DO NOTHING`: an update that assigns no column is not a
 statement, and doing nothing is what it would have amounted to. -/
@@ -978,15 +980,26 @@ private def startsWithCI (cs : List Char) (prefix' : String) : Bool :=
   letI s := prefix'.toList.map Char.toLower
   cs.length ≥ s.length && (cs.take s.length).map Char.toLower == s
 
+/-- Undo the doubling `quoteIdent` applies to the double quotes inside an identifier.
+
+Only inside the quotes: this is the inverse of what `quoteIdent` wrote, so it is applied exactly
+where the quotes have just been stripped. -/
+private def undoubleQuotes : List Char → List Char
+  | '"' :: '"' :: rest => '"' :: undoubleQuotes rest
+  | c :: rest => c :: undoubleQuotes rest
+  | [] => []
+
 /-- Strip what a database adds around a column reference when it reports an expression back:
-surrounding parentheses, a `::text` cast, and double quotes around the identifier. -/
+surrounding parentheses, a `::text` cast, and double quotes around the identifier — the last of
+which also undoes the doubling of the quotes inside, or the name read back is not the name that
+was declared and `autoUpdate` re-creates the index on every run instead of converging. -/
 private partial def normalizeIdent (cs : List Char) : List Char :=
   letI t := trimChars cs
   if endsWithCI t "::text" then normalizeIdent (t.take (t.length - 6))
   else if t.length ≥ 2 && t.head? == some '(' && t.getLast? == some ')' then
     normalizeIdent (t.drop 1 |>.take (t.length - 2))
   else if t.length ≥ 2 && t.head? == some '"' && t.getLast? == some '"' then
-    t.drop 1 |>.take (t.length - 2)
+    undoubleQuotes (t.drop 1 |>.take (t.length - 2))
   else t
 
 /-- Parse one key of an index DDL: a column or `lower(column)`, then an optional direction. -/

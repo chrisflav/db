@@ -152,7 +152,8 @@ migrations applied, and at the end so that the next demo's `autoUpdate` does not
 target does not declare and drop them. -/
 def migrationsTest : IO Unit := do
   let drop : PostgreSQL.M Unit := do
-    for table in ["mig_book", "mig_tag", "mig_author", "db_migrations"] do
+    -- `mig_writer` is what `renameDemo` leaves `mig_author` called.
+    for table in ["mig_book", "mig_tag", "mig_author", "mig_writer", "db_migrations"] do
       DBMonadWithMigrations.rawExecute s!"DROP TABLE IF EXISTS {table}"
   let x : PostgreSQL.M Unit := do
     drop
@@ -164,6 +165,9 @@ def migrationsTest : IO Unit := do
       IO.println "  a recorded-but-unknown migration was accepted, which it should not be."
     catch _ =>
       IO.println "  refused, as expected."
+    MigrationExample.forgetUnknownMigration
+    -- The renames, whose point is that the folded schema follows them the way the database does.
+    MigrationExample.renameDemo MigrationExample.migrations
     drop
   match ← PostgreSQL.runDB (← postgresUrl) x with
   | .error e => IO.println s!"Error occured: {repr e}."

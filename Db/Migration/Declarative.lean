@@ -138,10 +138,60 @@ def describe : Step → String
   | .run _ => "a code step"
 
 /-- Whether the step is a column change that SQLite realises by rebuilding the table, and which
-therefore cannot be applied inside a transaction there. -/
+therefore cannot be applied inside a transaction there.
+
+The list mirrors the SQLite backend's own `needsRebuild`, which is the thing that decides: a type
+or nullability change, of course, but also an `ADD COLUMN` SQLite rejects outright — a `NOT NULL`
+column whose default is missing or `NULL`, or a column with a non-constant default. Leaving the
+latter out would be worse than useless, since `ADD COLUMN` of a `NOT NULL` column is exactly what
+`makemigrations` writes for a new non-optional field of a model. -/
 def needsTableRebuildOnSqlite : Step → Bool
   | .schema (.alter _ (.alter _ _)) => true
+  | .schema (.alter _ (.insert _ c)) =>
+    match c.default? with
+    | some (.call _) => true
+    | some .null => !c.nullable
+    | some _ => false
+    | none => !c.nullable
   | _ => false
+
+/-- The table recipe with every mention of the column `old` replaced by `new`.
+
+A recipe names its columns by name in four more places than the column map: the primary key, the
+`UNIQUE` groups, the columns of a foreign key, and the keys of an index. Both backends rewrite all
+of them when they carry out a `RENAME COLUMN` — SQLite rewrites the stored `CREATE TABLE` and
+`CREATE INDEX` texts, PostgreSQL holds them by attribute number — so a fold that renamed only the
+key of the column map would claim a primary key over a column that no longer exists. Nothing could
+then close the gap: `makemigrations` would report a constraint mismatch on the table for ever, and
+the index would be proposed for dropping and re-creating on every run. -/
+def renamedColumnRefs (r : TableRecipe) (old new : String) : TableRecipe :=
+  letI rn := fun c => if c == old then new else c
+  { r with
+    primaryKey := r.primaryKey.map rn
+    unique := r.unique.map (·.map rn)
+    foreignKeys := r.foreignKeys.map fun fk => { fk with columns := fk.columns.map rn }
+    indexes := r.indexes.map fun idx =>
+      { idx with keys := idx.keys.map fun k => { k with column := rn k.column } } }
+
+/-- Every table's foreign keys after the table `table` renamed its column `old` to `new`: a key
+pointing at that table points at the new name, as it does in the database. -/
+def retargetedColumn (tables : Std.HashMap String TableRecipe) (table old new : String) :
+    Std.HashMap String TableRecipe :=
+  tables.map fun _ r =>
+    { r with
+      foreignKeys := r.foreignKeys.map fun fk =>
+        if fk.foreignTable == table then
+          { fk with foreignColumns := fk.foreignColumns.map fun c => if c == old then new else c }
+        else fk }
+
+/-- Every table's foreign keys after the table `old` was renamed to `new`: a key pointing at it
+follows the rename, as it does in the database. -/
+def retargetedTable (tables : Std.HashMap String TableRecipe) (old new : String) :
+    Std.HashMap String TableRecipe :=
+  tables.map fun _ r =>
+    { r with
+      foreignKeys := r.foreignKeys.map fun fk =>
+        if fk.foreignTable == old then { fk with foreignTable := new } else fk }
 
 /-- Apply one step to the schema `s`, or say why it cannot be applied.
 
@@ -163,30 +213,42 @@ def apply (s : DatabaseRecipe) : Step → Except String DatabaseRecipe
     | some recipe =>
       if s.tables.contains new then
         .error s!"cannot rename table `{old}` to `{new}`: a table of that name already exists"
-      else .ok { tables := (s.tables.insert new recipe).erase old }
+      else
+        .ok { tables := retargetedTable ((s.tables.insert new recipe).erase old) old new }
   | .schema (.alter name op) =>
     match s.tables[name]? with
     | none => .error s!"cannot alter table `{name}`: there is no such table"
-    | some recipe => do
-      let columns ← match op with
-        | .insert column c =>
-          if recipe.columns.contains column then
-            .error s!"cannot add column `{name}`.`{column}`: the table already has one"
-          else .ok (recipe.columns.insert column c)
-        | .remove column =>
-          if recipe.columns.contains column then .ok (recipe.columns.erase column)
-          else .error s!"cannot drop column `{name}`.`{column}`: the table has no such column"
-        | .rename old new =>
-          match recipe.columns[old]? with
-          | none => .error s!"cannot rename column `{name}`.`{old}`: the table has no such column"
-          | some c =>
-            if recipe.columns.contains new then
-              .error s!"cannot rename column `{name}`.`{old}` to `{new}`: the table already has one"
-            else .ok ((recipe.columns.insert new c).erase old)
-        | .alter column c =>
-          if recipe.columns.contains column then .ok (recipe.columns.insert column c)
-          else .error s!"cannot alter column `{name}`.`{column}`: the table has no such column"
-      return { tables := s.tables.insert name { recipe with columns := columns } }
+    | some recipe =>
+      match op with
+      | .insert column c =>
+        if recipe.columns.contains column then
+          .error s!"cannot add column `{name}`.`{column}`: the table already has one"
+        else
+          .ok { tables :=
+            s.tables.insert name { recipe with columns := recipe.columns.insert column c } }
+      | .remove column =>
+        if recipe.columns.contains column then
+          .ok { tables :=
+            s.tables.insert name { recipe with columns := recipe.columns.erase column } }
+        else .error s!"cannot drop column `{name}`.`{column}`: the table has no such column"
+      | .rename old new =>
+        match recipe.columns[old]? with
+        | none => .error s!"cannot rename column `{name}`.`{old}`: the table has no such column"
+        | some c =>
+          if recipe.columns.contains new then
+            .error s!"cannot rename column `{name}`.`{old}` to `{new}`: the table already has one"
+          else
+            -- The name has to follow into the constraints and indexes here and into the foreign
+            -- keys of every other table, which is what the databases do; see `renamedColumnRefs`.
+            letI renamed :=
+              renamedColumnRefs
+                { recipe with columns := (recipe.columns.insert new c).erase old } old new
+            .ok { tables := retargetedColumn (s.tables.insert name renamed) name old new }
+      | .alter column c =>
+        if recipe.columns.contains column then
+          .ok { tables :=
+            s.tables.insert name { recipe with columns := recipe.columns.insert column c } }
+        else .error s!"cannot alter column `{name}`.`{column}`: the table has no such column"
   | .index (.create table idx) =>
     match s.tables[table]? with
     | none => .error s!"cannot create index `{idx.name}`: there is no table `{table}`"
