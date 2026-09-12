@@ -82,27 +82,78 @@ rev = "master"
 SQLite is included because `leansqlite` vendors the database itself, so it costs a dependent package
 nothing but the build.
 
+That snippet is the whole configuration a SQLite-only package needs. It builds and runs with nothing
+on the machine but a C compiler: no PostgreSQL headers, no `pg_config`, no libpq. The PostgreSQL FFI
+shim is not compiled and nothing links against libpq unless you ask for it below.
+
 ### The PostgreSQL backend
 
 PostgreSQL is an FFI binding against libpq, so it is behind `import Db.Postgres` rather than in the
-root module: a package that never opens a PostgreSQL connection should not need the PostgreSQL
-headers to build or libpq to link.
+root module, and behind the `postgres` Lake configuration option as well. The import alone is not
+enough: Lake links the external libraries of every package that owns an imported module into every
+executable built from it, and builds them first, so an unconditional `extern_lib` here would make
+*your* SQLite-only package compile the shim — and need `libpq-fe.h` — whether or not it ever opened
+a PostgreSQL connection. Only a target that is absent from the configuration is truly not built, and
+the option is what removes it.
 
-A package that *does* use it has to name libpq in its own link arguments, because Lake does not
-propagate a dependency's link arguments to the packages that depend on it — only the FFI object
-itself, which then has nothing to resolve its `PQ*` calls against:
+So a package that uses the backend turns the option on in its `[[require]]`, and names libpq in its
+own link arguments:
+
+```toml
+[[require]]
+name = "Db"
+git = "https://github.com/chrisflav/db"
+rev = "master"
+options = {postgres = "on"}
+
+[[lean_exe]]
+name = "myapp"
+root = "Main"
+# The absolute path, not `-L/usr/lib/... -lpq`: the toolchain ships its own C runtime, and putting
+# the system library directory on the linker's search path makes it resolve glibc there too. Ask
+# `pg_config --libdir` where libpq is on the machine you are building on.
+moreLinkArgs = ["/usr/lib/x86_64-linux-gnu/libpq.so"]
+```
+
+In a `lakefile.lean` the same two pieces are
 
 ```lean
+require db from git "https://github.com/chrisflav/db" @ "master"
+  with NameMap.empty.insert `postgres "on"
+
 lean_exe myapp where
   root := `Main
-  -- The absolute path, not `-L/usr/lib/... -lpq`: the toolchain ships its own C runtime, and
-  -- putting the system library directory on the linker's search path makes it resolve glibc there
-  -- too. Ask `pg_config --libdir` where libpq is on the machine you are building on.
   moreLinkArgs := #["/usr/lib/x86_64-linux-gnu/libpq.so"]
 ```
 
-`lakefile.lean` here does this with `pg_config`, in `libpqLinkArgs`, which is worth copying if you
-build on more than one platform.
+The link arguments are yours to supply because Lake does not propagate a dependency's link arguments
+to the packages that depend on it — only the FFI object itself, which then has nothing to resolve
+its `PQ*` calls against. `lakefile.lean` here discovers the path with `pg_config`, in
+`libpqLinkArgs`, which is worth copying if you build on more than one platform.
+
+`import Db.Postgres` type-checks with the option off, since a `.olean` of `@[extern]` declarations
+needs no object behind them; it is linking an executable that calls them which needs the shim.
+
+### Building this repository
+
+The SQLite half of the example suite is the test driver and needs nothing special:
+
+```sh
+lake build testdb && lake exe testdb      # or: lake test
+```
+
+The PostgreSQL half needs the option, and needs it *before* the target name for `lake exe`, which
+passes everything after the target to the program:
+
+```sh
+lake -R build testdb-postgres -Kpostgres=on
+lake exe -Kpostgres=on testdb-postgres
+```
+
+It talks to the server named by `DB_POSTGRES_URL`, defaulting to
+`postgresql://testuser:secret@localhost/testdb2`. `lake -R` is what re-reads the configuration after
+a lakefile or option change; without it Lake reuses the configuration it cached for the previous
+setting of `-Kpostgres`.
 
 ## Query conditions
 
