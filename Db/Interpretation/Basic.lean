@@ -83,9 +83,15 @@ def init (database : DatabaseRecipe) : m Unit := do
 
 The operation language describes column changes only, so a table whose constraints differ from the
 target aborts the migration instead of being brought into a state that only looks like the target
-schema. -/
+schema.
+
+`autoUpdate` and the declarative migrations of `Db.Migration` are alternatives — the first for
+development, the second for production — but a database may well have been under both, so the
+tables the migration framework owns are hidden from `source` here. They are tables like any other
+and introspection reports them, and no application schema declares them, so without this the first
+`autoUpdate` after a `migrate` would drop the migration history. -/
 def autoUpdate (target : DatabaseRecipe) : m Unit := do
-  let source ← currentDatabase
+  let source := (← currentDatabase).without Db.Migration.frameworkTables
   letI mismatches := source.constraintMismatches target
   unless mismatches.isEmpty do
     abort <|

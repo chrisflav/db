@@ -6,6 +6,7 @@ import Db.Query.DSL
 import Db.Utils.VarChar
 import Db.Migration.Basic
 import Db.Migration.Recipe
+import Db.Migration.Declarative
 import Db.Model
 
 /-!
