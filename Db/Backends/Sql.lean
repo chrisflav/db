@@ -4,6 +4,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Christian Merten
 -/
 import Db.Interpretation.Basic
+import Db.Backends.Dialect
 import Std.Data.HashSet.Basic
 
 namespace SQL
@@ -618,13 +619,6 @@ def stripCast (s : String) : String := Id.run do
   match cut with
   | some n => return (s.take n).trimAscii.toString
   | none => return s
-
-/-- The SQL dialect a statement is rendered in. The two backends spell an auto-incrementing
-primary key differently, and nothing else in this module depends on the dialect. -/
-inductive Dialect where
-  | postgres
-  | sqlite
-  deriving Repr, BEq, DecidableEq
 
 namespace Migration
 

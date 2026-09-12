@@ -470,6 +470,11 @@ def rebuildTable (tableName : String) (commands : List AlterTableCommand) : M Un
 
 instance : DBMonadWithMigrations M where
   abort message := throw <| IO.userError s!"SQLite backend: {message}"
+  dialect := .sqlite
+  rawExecute statement := do
+    -- `exec` runs every statement of the text and discards the rows, which is exactly what a raw
+    -- migration step wants: `CREATE INDEX`, an `UPDATE` fixing up data, a `PRAGMA`.
+    (← read).exec statement
   currentDatabase := do
     let tableRows ← query <|
       "SELECT name AS nm FROM sqlite_master " ++
