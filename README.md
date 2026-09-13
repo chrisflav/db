@@ -170,6 +170,8 @@ is translated into an SQL condition. The following are recognised:
 | `c₁ ∧ c₂`, `c₁ ∨ c₂`, `¬ c` (or `&&`, `\|\|`, `!`) | `AND`, `OR`, `NOT` |
 | `b.year.isNone`, `b.year.isSome` | `IS NULL`, `IS NOT NULL` |
 | `b.year = some 1998` | `= 1998` |
+| `b.note = "classic"` | `= 'classic'` (a `String` constant is a `text` literal, `DBExpr.text`) |
+| `s.value > 1.0` | `> 1.0` (a `Float` constant is a `float` literal, `DBExpr.float`) |
 | `like b.title "A drama%"` | `LIKE 'A drama%'`, with `\\` escaping the next character |
 | `contains b.title "100%"` | `LIKE '%100\\%%'`, with the wildcards in the needle escaped |
 | `isIn a.name [v"Mike", v"Nora"]` | `IN ('Mike', 'Nora')` |
@@ -178,11 +180,19 @@ is translated into an SQL condition. The following are recognised:
 query block. In a `like` pattern `%` and `_` are wildcards and `\` escapes the character after it,
 including itself, so a literal backslash is written `\\`; this is declared to the backend as
 `ESCAPE '\'`, since PostgreSQL and SQLite disagree on the default. `contains` does that escaping
-for you. A nullable column projects to an `Option`-valued field, so `some` is written around a
-literal it is compared with; testing for `NULL` is `isNone`, not `= none`.
+for you. Both take a character-data column, either a `varchar n` one (a `VarChar n` field) or a
+`text` one (a `String` field). A nullable column projects to an `Option`-valued field, so `some` is
+written around a literal it is compared with; testing for `NULL` is `isNone`, not `= none`.
 
 Membership in a subquery, `col IN (SELECT ...)`, is `DBExpr.inSubquery` on the core API; the
 `query%` DSL has no surface syntax for it yet.
+
+None of the words the DSL spells its clauses with is a reserved keyword: `guard`, `select`,
+`order_by`, `order_by_desc`, `limit`, `offset` and the `v"..."` prefix are recognised only inside a
+`query% do` block, and stay ordinary identifiers everywhere else. Importing `Db` therefore leaves
+core's `guard` usable in a `do` block over `Option`/`Except`, and leaves `limit`, `offset`, `select`
+and `v` free for fields, locals and parameters — `Db/Examples/Identifiers.lean` uses both meanings
+in one module. (`from` is a Lean keyword, with or without this library.)
 
 ## Joins
 
@@ -263,9 +273,9 @@ IO.println s!"{← HasModel.count (QuerySet.all (α := Book))} books"
 
 More general aggregation is `Query.aggregate`, which takes an `Aggregation source out`: every
 column of the output view `out` is either a column of `source` that is grouped over, or an
-aggregate (`COUNT(*)`, `COUNT`, `COUNT DISTINCT`, `SUM`, `MIN`, `MAX`) of the rows of a group. A
-function is only applicable to the types it is defined on, so `SUM` over a `varchar` column does
-not elaborate. Supplying the output view is what keeps this general — it names and types the
+aggregate (`COUNT(*)`, `COUNT`, `COUNT DISTINCT`, `SUM`, `AVG`, `MIN`, `MAX`) of the rows of a
+group. A function is only applicable to the types it is defined on, so `SUM` over a `varchar`
+column does not elaborate. Supplying the output view is what keeps this general — it names and types the
 result columns, nullability included: grouping over a nullable column, or taking the `MIN` of one,
 produces a column that can be `NULL`:
 
@@ -278,7 +288,10 @@ def booksPerAuthor : Query mydb booksPerAuthorView :=
     (.all (HasModel.model Book).index)
 ```
 
-`AVG` is missing because `DBType` has no floating-point type to give its result.
+`SUM` and `AVG` are the two that need a number. `SUM` gives a value of the column's own type;
+`AVG` gives a `float` whatever it is taken of, an average being a value an integer column has no
+room for and not a value either backend hands back as one. Both are `NULL` for a group whose
+values are all `NULL`, as `MIN` and `MAX` are, and the output view has to say so.
 
 `Query.extend` adds a column computed from the row it belongs to, which is what a `SELECT` list
 does beyond naming columns — `project` renames and drops them and `aggregate` computes over a
@@ -291,7 +304,9 @@ let inTenYears : Query mydb _ :=
     (.all (HasModel.model Author).index)
 ```
 
-`DBExpr` has `add`, `sub` and `mul`, on integers only, `DBType` having no other numeric type.
+`DBExpr` has `add`, `sub` and `mul`, on integers only. Arithmetic on `float` columns is not there
+yet; what a float column can do in an expression is be compared with another one and with a
+literal.
 
 `Query.correlate` computes one such aggregate per row of an outer query, over the rows of a
 subquery correlated with that row — the `(SELECT COUNT(*) FROM child WHERE child.parent =
@@ -429,8 +444,70 @@ you, the name being what a reader of the generated SQL sees.
 
 ## Column types and defaults
 
-`DBType` covers `bool`, `int`, `varchar n` and unbounded `text`. A model field of type `String`
-becomes a `text` column, `Option α` a nullable one.
+`DBType` covers `bool`, `int`, `varchar n`, unbounded `text` and `float`. A model field of type
+`String` becomes a `text` column, one of type `Float` a `float` column, and `Option α` a nullable
+one. A comparison has both operands at one `DBType`, so a `text` column is compared with — and
+updated to — `DBExpr.text`, a `varchar n` one `DBExpr.str`, and a `float` one `DBExpr.float`.
+
+### Floating point
+
+`float` is a `Float`: an IEEE 754 double, the only floating-point type Lean has. It is declared as
+`double precision`, which is PostgreSQL's own name for it and the name PostgreSQL reports back,
+while SQLite — which takes any type name and derives an affinity from it — gives anything
+containing `DOUB` the same `REAL` affinity the word `REAL` has, and reports the declared text
+verbatim. So one spelling serves both dialects and `autoUpdate` reaches a fixed point on either.
+
+What a floating-point column costs is precision on the way in and on the way out, and both ends
+here are written so that a value read back is the value that was written, bit for bit.
+
+Writing is the literal. `Float.toString` prints six digits after the point — `toString (1e-7 :
+Float)` is `"0.000000"`, and every subnormal is zero — and `Lean.toJson` goes through the same
+printer, so neither can be what a literal is built from. `Float.toDecimalString` prints seventeen
+significant digits of the *exact* binary value instead, which is the shortest precision at which
+every double round-trips: `Float.frExp` gives the mantissa and exponent, `m · 2^53` is an integer,
+and the decimal digits are a long division carried out in exact `Nat` arithmetic. There is always
+a digit on either side of the point (`4.0`, never `4`), so that nothing a float column is set to
+reads as an integer.
+
+NaN and the infinities have no literal in either dialect — SQLite has none at all, and
+PostgreSQL's `'NaN'::double precision` is a cast of a string rather than a number. A statement
+carrying one is therefore refused by the backend before it is run, by the `nonFiniteError?` of the
+statement, and the error names the column the value belongs to. Rendering one used to be a `panic!`
+instead, which was worse in three ways at once: the backtrace went to stderr unordered against the
+program's own output, the statement was left reading `VALUES ()`, and what came back from SQLite
+was `near ")": syntax error`, naming neither the column nor the value. `Expr.toString` is a printer
+again, and prints Lean's own spelling of such a value, which no backend gets to see.
+
+What this leaves is an asymmetry on the reading side. PostgreSQL can *store* a NaN or an infinity
+in a `double precision` column, prints it as `NaN` or `Infinity`, and `Float.ofDecimalString?`
+reads both, so a row written by something else comes back carrying a value this library will not
+write again: reporting it beats refusing to read the row. Closing the gap would mean rendering
+`'NaN'::double precision` on the PostgreSQL dialect alone, and `Expr.toString` renders one SQL for
+both backends — the `Dialect` would have to be threaded through all of it. SQLite has the narrower
+version of the same gap: it has no literal for either value, but `9e999` overflows to an infinity
+in its own parser and a `REAL` column keeps that, while a NaN it stores as `NULL`, having nowhere
+to put it.
+
+Reading is the backends' own printing, and neither prints enough by default. SQLite converts a
+`REAL` to text at fifteen significant digits, so `0.30000000000000004` would come back as `0.3` and
+the largest double as an infinity; the SQLite backend therefore reads a value SQLite holds as a
+float through `sqlite3_column_double` and prints it with the printer above. Which values those are
+is decided by the value's own runtime type rather than by the declared column type, SQLite storing
+what it was given whatever the column says. PostgreSQL prints what `extra_float_digits` asks for,
+which since version 12 defaults to the shortest text that round-trips but on older servers is
+fifteen digits, so the connection sets it to the maximum on open. `Float.ofDecimalString?` reads
+back what either prints — `0.1`, `-3`, `1e-07`, `1.0e+20`, `1E5`, `.5` — and the spellings
+`Infinity` and `NaN` besides, so that a row holding one is reported rather than refused.
+
+`ColumnDefault` has no floating-point literal: it derives `DecidableEq` and `Hashable`, and `Float`
+has neither. A whole number is still a default a float column can have — `.int 0`, which both
+dialects widen to the column's type and which `ColumnDefault.parse?` reads back as the `.int` it
+was declared as, so it round-trips as itself. Anything else is written as an expression,
+`.call "0.5"`, and what makes an expression default converge is not its text but the comparison the
+migration diff makes: `BEq Column` treats any two `.call` defaults as equal, so a database that
+rewrites the text of one — as PostgreSQL does — does not thereby make the column differ from what
+was declared. The price is the one the paragraph on defaults below states, that a change to an
+expression default is not migrated.
 
 A column may declare a `default?`, which the database fills in when an insert omits it:
 
@@ -458,8 +535,11 @@ The SQL text of a `.call` default is passed to the backend unchanged, so it has 
 target database knows — `unixepoch()` is SQLite's, PostgreSQL spells it differently. Defaults are
 read back by schema introspection so that `autoUpdate` reaches a fixed point. Since a database
 rewrites the text of an expression default when it reports it back (PostgreSQL reports a declared
-`abs(-1)` as `abs('-1'::integer)`), two expression defaults are compared as equal, and a change to
-one is not migrated.
+`abs(-1)` as `abs('-1'::integer)`), the `BEq Column` the migration diff compares columns with holds
+any two `.call` defaults to be equal — not `ColumnDefault`'s own equality, which is textual like
+any derived one. So a change to an expression default is not migrated, and a default that is *not*
+an expression has to be read back as the literal it was declared as, or the column differs from its
+declaration on every run.
 
 Values read from a database keep `NULL` apart from the empty string: the backends use the driver's
 null flag rather than treating an empty result as `NULL`, which matters as soon as a column holds
@@ -484,6 +564,34 @@ def noteTagTable : Table where
 The referencing columns are indices of the table, the referenced ones strings, since a `Table` does
 not know the database it belongs to.
 
+A model's key is declared on the attribute, as the field names it is made of, in the order it is
+made of them:
+
+```lean4
+@[model (dbName := "profile") (primaryKey := ["handle"]) mydb]
+structure Profile where
+  handle : String
+  displayName : String
+
+@[model (dbName := "event") (primaryKey := ["session", "seq"]) mydb]
+structure Event where
+  session : String
+  seq : Int
+  body : String
+```
+
+The names are checked against the structure: one that is not a field, or one named twice, is an
+error where the attribute is written rather than SQL naming a column that is not there. Without
+this a model had no key at all unless it had an `AutoKey` field, and `insertIfAbsent` and `upsert`
+then had nothing to conflict on — a record keyed by an id its writer chooses, which is most of
+what a record store holds, could not say so.
+
+So is a name whose field is an `Option`, because a nullable primary key is not one either backend
+keeps. PostgreSQL makes such a column `NOT NULL` behind the declaration, reports it back as such,
+and then refuses the `DROP NOT NULL` `autoUpdate` proposes on every later run, so the schema never
+converges; SQLite lets a `NULL` into a key column, where two rows whose key is `none` are two rows
+that conflict with nothing and `save` stores both.
+
 A column may be `autoIncrement`, meaning the database assigns its value; `Database.Insert.ofEntry`
 leaves such a column out, so the model layer never sends one. In a model structure a field of type
 `AutoKey` becomes exactly that — an auto-incrementing single-column primary key:
@@ -494,6 +602,10 @@ structure Tag where
   id : AutoKey
   label : VarChar 50
 ```
+
+A generated key and a declared one exclude each other, and the attribute says so rather than
+emitting a schema neither backend would create: the database assigning a column's value only means
+anything if that column *is* the key, so a `primaryKey` beside an `AutoKey` field is an error.
 
 `CREATE TABLE` renders these per dialect, since the two backends spell a generated key differently
 (`INTEGER PRIMARY KEY AUTOINCREMENT` against `GENERATED BY DEFAULT AS IDENTITY`), and both backends
@@ -811,6 +923,23 @@ need to upsert.
 
 A skipped row is a row the statement did not store, so `insertReturning` on an `.ignore` insert
 returns no rows rather than the row that was already there.
+
+`HasModel.save` is the upsert a record store writes with: store this row, replacing whatever is
+under its primary key.
+
+```lean4
+HasModel.save ({ handle := "ada", displayName := "Ada Lovelace" } : Profile)
+```
+
+It is `upsert x` on the table's primary key, setting every column that is not part of that key, so
+it needs a key to conflict on: a model that declares none aborts, naming the table, rather than
+storing a second row that looks like the first. A model every column of which is part of its key
+has nothing to set, and there `save` is an `insertIfAbsent` — the row already there *is* the row
+being written. A key the *database* assigns aborts as well, naming the column: an `AutoKey` is left
+out of the statement, so the insert carries no value for the key, nothing conflicts on it, and the
+upsert is a plain insert that appends a row on every call. That one is not a statement either
+backend objects to — the key is there — so it is refused here, and `insert`/`insertReturning`, or a
+key over the columns the row does supply, is what writes such a record.
 
 `DBMonadTransactional.withTransaction` groups several operations into one atomic unit, committing
 if the block succeeds and rolling back if it fails. A nested call is a savepoint, so its failure

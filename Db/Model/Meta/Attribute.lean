@@ -24,7 +24,16 @@ def addModelTag {m : Type → Type} [MonadEnv m] (tag : ModelTag) : m Unit :=
   modifyEnv (tagExt.addEntry · tag)
 
 structure ModelConfig where
+  /-- The name of the table in the database; the name of the structure if this is absent. -/
   dbName : Option String := none
+  /-- The fields that are the table's primary key, in the order they are the key in:
+  `(primaryKey := ["id"])`, or `(primaryKey := ["session_id", "seq"])` for a composite one.
+
+  Empty for a model that declares none, whose key is then its `AutoKey` field if it has one and
+  nothing at all otherwise. A declared key and an `AutoKey` field together are refused: a generated
+  key has to be the whole primary key. So is a key over an `Option` field, which would be a
+  nullable key column; `generateTable` says why. -/
+  primaryKey : List String := []
   deriving Inhabited
 
 declare_command_config_elab elabModelConfig ModelConfig
@@ -35,7 +44,7 @@ def elabModelTag (cfg : ModelConfig) (decl database : Name) : AttrM Unit := do
   let some _ ← getDatabaseTag? database
     | throwError s!"Unknown database `{database}`."
   liftCommandElabM <| do
-    generateTable decl
+    generateTable decl cfg.primaryKey
     let tableInfo : TableInfo :=
       { tableDecl := s!"{decl}Table".toName
         typeDecl? := decl

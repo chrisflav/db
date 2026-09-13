@@ -90,7 +90,7 @@ def addHasModel (tableTypeDecl database : Name) : CommandElabM Unit := do
         model := $(mkIdent modelDecl))
   elabCommand instStx
 
-elab "add_table" tableTypeDecl:ident " to " database:ident : command => do
+elab "add_table" tableTypeDecl:ident &" to " database:ident : command => do
   let tableDecl : Name := s!"{tableTypeDecl.getId}Table".toName
   let info : TableInfo :=
     { tableDecl := tableDecl

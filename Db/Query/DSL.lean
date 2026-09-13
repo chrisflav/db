@@ -31,33 +31,45 @@ the full interactive experience: hovering over `x` shows its type, dot-completio
 suggests the fields of `T`, "go to definition" works, and ill-typed comparisons are reported by
 Lean's own elaborator. The `guard`/`select` clauses are elaborated as ordinary terms in this
 context and are then translated into the `Query`/`DBExpr`/`View` core.
+
+None of `guard`, `select`, `order_by`, `order_by_desc`, `limit` and `offset` is a reserved keyword:
+they are recognised only as the first word of a statement of a query block, and remain usable as
+identifiers everywhere else, so importing this module does not take `guard` away from `do` blocks
+over `Option`/`Except` or forbid a field called `limit`. (`from` is a Lean keyword already.)
 -/
 
 open Lean Elab Term Meta
 
 namespace Db.Query.DSL
 
-/-- A single statement of a `query% do` block. -/
-declare_syntax_cat queryStmt
+/-- A single statement of a `query% do` block.
+
+The clause keywords are declared as *non-reserved* symbols (`&"guard"`, `&"select"`, ...), so that
+they remain ordinary identifiers everywhere outside a query block: a module that imports this one
+can still call core `guard` in a `do` block, or name a field `limit`. A non-reserved symbol is lexed
+as an identifier rather than as a token, which is why this category is declared with
+`behavior := symbol`: that is what makes the leading identifier of a statement select the parser
+registered under that very name, instead of the (empty) set of identifier parsers. -/
+declare_syntax_cat queryStmt (behavior := symbol)
 
 /-- Bind a table source: `let x ← from T`, where `T` has a `HasModel` instance. -/
 syntax (name := queryBind) "let " ident " ← " "from " term : queryStmt
 /-- A filter condition, e.g. `guard a.retired` or `guard b.author = a.name`. -/
-syntax (name := queryGuard) "guard " term : queryStmt
+syntax (name := queryGuard) &"guard " term : queryStmt
 /-- Project the query onto one of the bound variables: `select x`. -/
-syntax (name := querySelect) "select " ident : queryStmt
+syntax (name := querySelect) &"select " ident : queryStmt
 /-- How a sort key compares and where it puts its `NULL`s: `nocase` folds case, `nulls_first` and
 `nulls_last` place the nulls, and either may be left out. -/
 syntax sortModifier := &"nocase" <|> &"nulls_first" <|> &"nulls_last"
 /-- Sort the result by a column of the selected table, e.g. `order_by b.title`, optionally
 `order_by b.title nocase nulls_last`. -/
-syntax (name := queryOrderBy) "order_by " term:max (sortModifier)* : queryStmt
+syntax (name := queryOrderBy) &"order_by " term:max (sortModifier)* : queryStmt
 /-- Sort the result by a column of the selected table, descending. -/
-syntax (name := queryOrderByDesc) "order_by_desc " term:max (sortModifier)* : queryStmt
+syntax (name := queryOrderByDesc) &"order_by_desc " term:max (sortModifier)* : queryStmt
 /-- Keep at most `n` rows of the result, e.g. `limit 10`. -/
-syntax (name := queryLimit) "limit " num : queryStmt
+syntax (name := queryLimit) &"limit " num : queryStmt
 /-- Skip the first `n` rows of the result, e.g. `offset 20`. -/
-syntax (name := queryOffset) "offset " num : queryStmt
+syntax (name := queryOffset) &"offset " num : queryStmt
 
 /-- `query% do ...` elaborates a `do`-style query block into a `QuerySet`. -/
 syntax (name := queryDo) "query%" "do" many1Indent(queryStmt) : term
@@ -135,13 +147,15 @@ private def mkTextLikeProof : TermElabM Expr :=
   mkEqRefl (Lean.mkConst ``Bool.true)
 
 /-- Inside a `query% do` block, `like col pattern` is SQL's `col LIKE pattern`, where `%` and `_`
-in `pattern` are wildcards. It has no meaning outside a query block. -/
-def like {n : Nat} (_col : VarChar n) (_pattern : String) : Bool := false
+in `pattern` are wildcards. The column is character data, either a `varchar n` one (a `VarChar n`
+field) or a `text` one (a `String` field); the column type is what the translation checks, which is
+why the argument here is not restricted. It has no meaning outside a query block. -/
+def like {α : Type} (_col : α) (_pattern : String) : Bool := false
 
 /-- Inside a `query% do` block, `contains col s` matches the rows whose `col` contains `s` as a
-substring, i.e. `col LIKE '%s%'` with the wildcards occurring in `s` escaped. It has no meaning
-outside a query block. -/
-def contains {n : Nat} (_col : VarChar n) (_s : String) : Bool := false
+substring, i.e. `col LIKE '%s%'` with the wildcards occurring in `s` escaped. Like `like`, it takes
+a `varchar n` or a `text` column. It has no meaning outside a query block. -/
+def contains {α : Type} (_col : α) (_s : String) : Bool := false
 
 /-- Inside a `query% do` block, `isIn col [v₁, ..., vₙ]` is SQL's `col IN (v₁, ..., vₙ)`. It has no
 meaning outside a query block. -/
@@ -248,9 +262,15 @@ private partial def transVal (ctx : Context) (e : Expr) : TermElabM (Expr × Exp
       let n := ty.appArg!
       let t := mkApp (mkConst ``DBType.varchar) n
       return (← mkAppOptM ``DBExpr.str #[some ctx.db, some ctx.view, some n, some e], t)
+    if ty.isConstOf ``String then
+      return (← mkAppOptM ``DBExpr.text #[some ctx.db, some ctx.view, some e],
+        Lean.mkConst ``DBType.text)
     if ty.isConstOf ``Int then
       return (← mkAppOptM ``DBExpr.int #[some ctx.db, some ctx.view, some e],
         Lean.mkConst ``DBType.int)
+    if ty.isConstOf ``Float then
+      return (← mkAppOptM ``DBExpr.float #[some ctx.db, some ctx.view, some e],
+        Lean.mkConst ``DBType.float)
   throwError m!"unsupported expression in query condition: `{e}`"
 
 /-- Translate a term that is expected to denote a boolean condition. -/

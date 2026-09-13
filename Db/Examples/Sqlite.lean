@@ -7,6 +7,8 @@ import Db.Examples.Schema
 import Db.Examples.Migrations
 import Db.Examples.Joins
 import Db.Examples.Recursive
+import Db.Examples.Floats
+import Db.Examples.Keys
 
 /-!
 # SQLite backend example
@@ -506,16 +508,33 @@ def defaultsDemo : Sqlite.M Unit := do
         | .archived => some true
         | .created => some (0 : Int)
         | .tag => some none }
-  let rows ← DBMonad.lookup (Query.all (d := noteDb) .note)
-  IO.println "Notes:"
-  for row in rows do
-    letI body : String := row.value .body
-    letI tag : Option String := row.value .tag
-    letI created : Int := row.value .created
-    IO.println <|
-      s!"  id={row.value .id} body={repr body} state={row.value .state} " ++
-      s!"archived={row.value .archived} tag={repr tag} " ++
-      s!"created is set: {if 0 < created then "yes" else "no"}"
+  let printNotes (header : String) : Sqlite.M Unit := do
+    let rows ← DBMonad.lookup (Query.all (d := noteDb) .note)
+    IO.println header
+    for row in rows do
+      letI body : String := row.value .body
+      letI tag : Option String := row.value .tag
+      letI created : Int := row.value .created
+      IO.println <|
+        s!"  id={row.value .id} body={repr body} state={row.value .state} " ++
+        s!"archived={row.value .archived} tag={repr tag} " ++
+        s!"created is set: {if 0 < created then "yes" else "no"}"
+  printNotes "Notes:"
+  -- A `text` column is compared with a literal at its own type: `eq` has both operands at one
+  -- `DBType`, and `DBExpr.str` is the bounded one, at `varchar n`.
+  let urgent ← DBMonad.lookup
+    (Query.filter (.eq (.var NoteIndex.tag .text) (.text "urgent")) (Query.all (d := noteDb) .note))
+  IO.println s!"Notes tagged \"urgent\": {urgent.map fun row => (row.value NoteIndex.id : Int)}"
+  -- The same literal on the right of an `UPDATE ... SET`, for a `text` column and for a nullable
+  -- one, on the row the condition picks out.
+  let changed ← DBMonad.update (d := noteDb) (name := NoteDbIndex.note)
+    { value
+        | .body => some (.text "edited")
+        | .tag => some (.text "later")
+        | _ => none
+      condition := .eq (.var NoteIndex.id .int) (.int 2) }
+  IO.println s!"Updated {changed} note(s) with text literals."
+  printNotes "Notes after the update:"
   -- The defaults have to survive introspection, or `autoUpdate` would keep trying to fix them.
   let pending := (← currentDatabase).operations noteDb.recipe
   IO.println s!"Pending operations after creating the schema: {pending.size}"
@@ -929,6 +948,14 @@ structure Label where
   colour : VarChar 20
   deriving Repr
 
+/-- A memo, whose only content is a `String` field — an unbounded `text` column, which is what the
+`query%` DSL needs `DBExpr.text` for: a condition on it compares it with a literal at `text`. -/
+@[model (dbName := "memo") labeldb]
+structure Memo where
+  id : AutoKey
+  text : String
+  deriving Repr
+
 /-- `name` is unique, by an index declared on the recipe: `@[model]` generates no indexes, and an
 `AutoKey` would be no use here — the database assigns it, so the insert leaves it out and no row
 ever conflicts on it. -/
@@ -947,8 +974,127 @@ def modelConflictDemo : Sqlite.M Unit := do
   IO.println <|
     s!"upsert stored {rows.size} row(s), colour now " ++
     s!"{(rows[0]?.map (·.colour.val)).getD "?"}"
+  -- A `text` column in the DSL: a `String` constant is embedded as `DBExpr.text`, and `like` and
+  -- `contains` take a `text` column as readily as a `varchar n` one.
+  let hello ← HasModel.insertReturning ({ id := 0, text := "hello" } : Memo)
+  let world ← HasModel.insertReturning ({ id := 0, text := "world" } : Memo)
+  IO.println s!"Inserted memos: {hello.id}={hello.text}, {world.id}={world.text}"
+  let exact ← fetch <| query% do
+    let m ← from Memo
+    guard m.text = "hello"
+    select m
+  IO.println s!"Memos equal to \"hello\": {exact.map (·.text)}"
+  let substring ← fetch <| query% do
+    let m ← from Memo
+    guard contains m.text "ell"
+    select m
+  IO.println s!"Memos containing \"ell\": {substring.map (·.text)}"
+  let prefixed ← fetch <| query% do
+    let m ← from Memo
+    guard like m.text "h%"
+    select m
+  IO.println s!"Memos matching \"h%\": {prefixed.map (·.text)}"
 
 end ModelConflicts
+
+/-- A hand-written table with two defaults on float columns. `ColumnDefault` has no floating-point
+literal — it derives `DecidableEq` and `Hashable`, and `Float` has neither — so a fractional
+default is an expression, and what makes an expression converge is the comparison rather than the
+text: `BEq Column`, which the migration diff uses, holds any two `.call` defaults to be equal,
+however the database rewrites the text of one. An integer default is a literal like any other, and
+has to come back as the `.int` it was declared as.
+
+A database of its own, which only the SQLite suite can afford: `autoUpdate` drops the tables its
+target does not declare, and every demo here runs against a fresh in-memory database. -/
+def gaugeDb : DatabaseRecipe where
+  tables := .ofList
+    [("gauge",
+      { columns := .ofList
+          [("id", { type := .int, nullable := false }),
+           ("reading", { type := .float, nullable := false, default? := some (.call "0.0") }),
+           -- An integer literal is a default a float column can have — both dialects widen it —
+           -- and it has to be read back as the `.int` it was declared as. Parsed as an expression
+           -- it would differ from the declaration on every run.
+           ("offset", { type := .float, nullable := false, default? := some (.int 0) })]
+        primaryKey := ["id"] })]
+
+/-- `save` on a model with no primary key has nothing to conflict on, so it says so rather than
+storing a second row that looks like the first. `Book` is such a model: ordinary columns, no
+declared key and no `AutoKey` field. -/
+def saveWithoutKeyDemo : Sqlite.M Unit := do
+  autoUpdate (%database mydb)
+  try
+    HasModel.save novel
+    IO.println "a keyless save was accepted, which it should not be."
+  catch e =>
+    IO.println s!"refused, as expected: {e}"
+
+/-- `save` on a model whose key the database generates is refused too, and for a subtler reason:
+there *is* a key, so the upsert is built and runs, but the insert leaves the generated column out,
+nothing conflicts on it, and every call appends a row. `Tag` is such a model — a single `AutoKey`
+field. The table has to be empty afterwards, or the refusal came too late to be one. -/
+def saveWithGeneratedKeyDemo : Sqlite.M Unit := do
+  autoUpdate (%database mydb)
+  for _ in [0:2] do
+    try
+      HasModel.save ({ id := 0, label := v"urgent" } : Tag)
+      IO.println "a save on a generated key was accepted, which it should not be."
+    catch e =>
+      IO.println s!"refused, as expected: {e}"
+  IO.println s!"rows in `tag` after two saves: {← HasModel.count (QuerySet.all (α := Tag))}"
+
+/-- A NaN and an infinity have no literal in either dialect, so a statement carrying one is refused
+before it runs, naming the column it came from. It used to be a `panic!` inside the renderer: a
+backtrace on stderr, unordered against the program's own output, a statement left reading
+`VALUES ()`, and `near ")": syntax error` back from SQLite, which named neither the column nor the
+value. A condition is checked as well as a value, since a query can compare a column with one. -/
+def nonFiniteFloatDemo : Sqlite.M Unit := do
+  autoUpdate (%database mydb)
+  let nan := 0.0 / 0.0
+  let infinity := 1.0 / 0.0
+  let values := [("a NaN", nan), ("an infinity", infinity), ("a negative infinity", -infinity)]
+  for (label, x) in values do
+    try
+      HasModel.insert ({ id := 0, value := x, margin := none } : Sample)
+      IO.println s!"an insert of {label} was accepted, which it should not be."
+    catch e =>
+      IO.println s!"refused, as expected: {e}"
+  -- The same value in a condition rather than in a row.
+  try
+    let _ ← HasModel.delete (α := Sample) (.eq (.var SampleIndex.value .float) (.float nan))
+    IO.println "a delete on a NaN was accepted, which it should not be."
+  catch e =>
+    IO.println s!"refused, as expected: {e}"
+  -- Nothing of this reached the database: the statements were refused before they were run.
+  IO.println s!"rows in `sample`: {← HasModel.count (QuerySet.all (α := Sample))}"
+  -- And what SQLite does with such a value that reaches it another way. `9e999` overflows to an
+  -- infinity in SQLite's own parser, which a `REAL` column then keeps; a NaN it stores as `NULL`,
+  -- having nowhere to put it. So a row can come back holding a value the library will not write,
+  -- which is the asymmetry the README describes — on this side reporting it beats refusing to read
+  -- the row.
+  rawExecute "CREATE TABLE nonfinite (x REAL)"
+  rawExecute "INSERT INTO nonfinite VALUES (9e999), (9e999 - 9e999)"
+  for row in ← query "SELECT typeof(x) AS ty, CAST(x AS TEXT) AS v FROM nonfinite" do
+    IO.println s!"  SQLite stored it as {row.textD "ty" "?"}: {row.textD "v" "NULL"}"
+
+/-- A default on a float column reaches a fixed point too: the expression default of `reading` and
+the integer one of `offset` both have to come back as what was declared, or `autoUpdate` proposes
+the same `ALTER COLUMN` for ever and `makemigrations` writes a migration that changes nothing. -/
+def floatDefaultDemo : Sqlite.M Unit := do
+  autoUpdate gaugeDb
+  autoUpdate gaugeDb
+  let current ← currentDatabase
+  let pending := (current.operations gaugeDb).size
+  IO.println s!"pending operations on `gauge` after two autoUpdates: {pending}"
+  unless pending == 0 do
+    throw <| IO.userError <|
+      s!"two autoUpdates against `gaugeDb` left {pending} operation(s) pending, so a float " ++
+      "default does not round-trip"
+  let readBack : String → String := fun column =>
+    letI col := current.tables["gauge"]?.bind (·.columns[column]?)
+    s!"{repr (col.map fun c => (c.type, c.default?))}"
+  IO.println s!"the type and default read back for `gauge`.`reading`: {readBack "reading"}"
+  IO.println s!"the type and default read back for `gauge`.`offset`: {readBack "offset"}"
 
 /-- Change `mig_book.year` from an integer to text. SQLite realises a column type change by
 rebuilding the table, which is why this exists in two versions: the atomic one cannot work there,
@@ -1083,6 +1229,12 @@ def test : IO Unit := do
   Sqlite.runDB ":memory:" extendDemo
   Sqlite.runDB ":memory:" correlateDemo
   Sqlite.runDB ":memory:" modelConflictDemo
+  Sqlite.runDB ":memory:" (FloatExample.floatDemo "SQLite")
+  Sqlite.runDB ":memory:" floatDefaultDemo
+  Sqlite.runDB ":memory:" nonFiniteFloatDemo
+  Sqlite.runDB ":memory:" (KeyExample.keyDemo "SQLite")
+  Sqlite.runDB ":memory:" saveWithoutKeyDemo
+  Sqlite.runDB ":memory:" saveWithGeneratedKeyDemo
   Sqlite.runDB ":memory:" migrationsDemo
   Sqlite.runDB ":memory:" identifierDemo
 

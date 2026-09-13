@@ -6,6 +6,7 @@ Authors: Christian Merten
 import Std
 import Db.Utils.VarChar
 import Db.Utils.FromString
+import Db.Utils.Float
 import Db.Utils.Enum
 import Db.Utils.String
 
@@ -97,6 +98,9 @@ inductive DBType where
   | varchar (n : Nat) : DBType
   /-- Character data of unbounded length. -/
   | text : DBType
+  /-- Binary floating point at double precision — an IEEE 754 `binary64`, which is Lean's `Float`.
+  `REAL` to SQLite, `double precision` to PostgreSQL. -/
+  | float : DBType
   deriving BEq, Repr, DecidableEq, Hashable
 
 protected abbrev DBType.Value : DBType → Type
@@ -104,6 +108,7 @@ protected abbrev DBType.Value : DBType → Type
   | .varchar n => VarChar n
   | .text => String
   | .int => Int
+  | .float => Float
 
 instance (t : DBType) : ToString t.Value where
   toString x :=
@@ -112,6 +117,9 @@ instance (t : DBType) : ToString t.Value where
     | .varchar _ => toString x
     | .text => x
     | .int => toString x
+    -- Seventeen significant digits rather than the six `Float.toString` prints: a value printed
+    -- here is one someone may read back.
+    | .float => Float.toDecimalString x
 
 instance (t : DBType) : Inhabited t.Value where
   default :=
@@ -120,12 +128,14 @@ instance (t : DBType) : Inhabited t.Value where
     | .varchar _ => ⟨"", by simp⟩
     | .text => default
     | .int => default
+    | .float => default
 
 instance : (t : DBType) → FromString t.Value
   | .bool => inferInstance
   | .int => inferInstance
   | .varchar _ => inferInstance
   | .text => inferInstance
+  | .float => inferInstance
 
 /-- The value a column takes when an insert does not supply one. -/
 inductive ColumnDefault where
@@ -505,15 +515,16 @@ structure SortKey {d : Database} (view : View d) where
   collation : Collation := .binary
   nulls : NullsOrder := .default
 
-/-- An aggregate function of one column.
-
-`AVG` is missing because `DBType` has no floating-point type to give its result. -/
+/-- An aggregate function of one column. -/
 inductive AggregateFn where
   | count
   | countDistinct
   | sum
   | min
   | max
+  /-- The arithmetic mean. Its result is a `float` whatever it is applied to, an average being a
+  value the column's own type generally has no room for. -/
+  | avg
   deriving DecidableEq, Repr
 
 /-- The name under which an aggregate function is applied in SQL. -/
@@ -522,18 +533,21 @@ def AggregateFn.toString : AggregateFn → String
   | .sum => "SUM"
   | .min => "MIN"
   | .max => "MAX"
+  | .avg => "AVG"
 
 /-- Whether the aggregate applies to the distinct values of its column. -/
 def AggregateFn.distinct : AggregateFn → Bool
   | .countDistinct => true
   | _ => false
 
-/-- Whether the function is defined on values of this type. Counting works on anything, `SUM` only
-on numbers, and `MIN`/`MAX` on everything the databases order, which excludes booleans. -/
+/-- Whether the function is defined on values of this type. Counting works on anything, `SUM` and
+`AVG` only on numbers, and `MIN`/`MAX` on everything the databases order, which excludes
+booleans. -/
 def AggregateFn.appliesTo : AggregateFn → DBType → Bool
   | .count, _ => true
   | .countDistinct, _ => true
-  | .sum, t => t == .int
+  | .sum, t => t == .int || t == .float
+  | .avg, t => t == .int || t == .float
   | .min, t => t != .bool
   | .max, t => t != .bool
 
@@ -554,6 +568,9 @@ def AggregateEntry.column {d : Database} {source : View d} : AggregateEntry sour
   | .countAll => { type := .int, nullable := false }
   | .apply .count _ _ => { type := .int, nullable := false }
   | .apply .countDistinct _ _ => { type := .int, nullable := false }
+  -- An average is not a value of the column's own type: the mean of an `int` column is not an
+  -- integer, and both backends hand one back as a floating-point number.
+  | .apply .avg _ _ => { type := .float, nullable := true }
   -- `SUM`, `MIN` and `MAX` are `NULL` for a group in which every value is `NULL`, whatever the
   -- column they are applied to.
   | .apply _ col _ => { type := (source.name col).dbtype, nullable := true }
@@ -650,8 +667,16 @@ inductive DBExpr (d : Database) : View d → DBType → Type 1 where
   | mul {view : View d} (e₁ e₂ : DBExpr d view .int) : DBExpr d view .int
   /-- A string literal. -/
   | str {view : View d} {n : Nat} (s : VarChar n) : DBExpr d view (.varchar n)
+  /-- A string literal at type `text`. `str` is the bounded one, at `varchar n`; a comparison
+  has both operands at one type, so a `text` column needs a literal at its own. -/
+  | text {view : View d} (s : String) : DBExpr d view .text
   /-- An integer literal. -/
   | int {view : View d} (n : Int) : DBExpr d view .int
+  /-- A floating-point literal. It is rendered at seventeen significant digits of the exact binary
+  value, so that the database stores the value that was written rather than a rounding of it. NaN
+  and the infinities have no such literal, and a statement carrying one is refused by the backend
+  before it is run rather than rendered into SQL no database will parse. -/
+  | float {view : View d} (x : Float) : DBExpr d view .float
   /-- The literal `NULL`, at a given type. -/
   | null {view : View d} (t : DBType) : DBExpr d view t
 

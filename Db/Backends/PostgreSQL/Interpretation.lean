@@ -37,7 +37,20 @@ structure State where
 
 abbrev M := ExceptT Exception (StateT State IO)
 
+/-- Run `x` against the connection `s` holds, settling what the connection has to be set to first.
+
+Here rather than in `runDB` so that a caller that builds its own `State` — around a connection it
+opened itself, or one it keeps across several runs — gets the same connection, rather than one that
+reads floating-point columns short.
+
+That setting is `extra_float_digits`. Values come back as the text the server prints for them, so a
+`double precision` column is only read back exactly if the server prints all of its digits;
+`extra_float_digits` is 1 by default on PostgreSQL 12 and later, which already means "the shortest
+text that round-trips", while older servers default to 0, which is fifteen significant digits and
+loses the last bits of a double. Asking for the maximum says the same thing to both. The result is
+ignored: a server that will not take the setting is no reason to refuse the work. -/
 nonrec def M.run (s : State) {α : Type} (x : M α) : IO (Except Exception α) := do
+  let _ ← s.connection.exec "SET extra_float_digits = 3"
   return (← x.run.run s).1
 
 def runDB (connectionInfo : String) {α : Type} (x : M α) : IO (Except Exception α) := do
@@ -86,32 +99,52 @@ def execCounting (sql : String) : M Nat := do
     IO.println s!"{repr e}"
     throw .fatal
 
+/-- Refuse a statement that cannot be rendered, saying why, before anything is sent to the server.
+
+The reason comes from the `nonFiniteError?` of the statement: a NaN or an infinity has no literal
+here either. PostgreSQL can *store* one, and `Float.ofDecimalString?` reads the `NaN` and `Infinity`
+it prints back, so a row read from a column another writer filled can hold a value this library
+will not write again — see the README. Spelling it `'NaN'::double precision` on this dialect alone
+would close that gap, at the price of threading a `Dialect` through the whole of `Expr.toString`,
+which renders one SQL for both backends today. -/
+def refuse (reason? : Option String) : M Unit :=
+  match reason? with
+  | some reason => throw (.userError reason)
+  | none => pure ()
+
 instance (d : Database) : DBMonad d M where
   lookup {view} q := do
     let sql : SQL.Select := .fromQuery q
+    refuse sql.nonFiniteError?
     decodeRows view (← rowsOf sql.toString)
   insert {_table} data := do
     let sql : SQL.Insert := .fromInsert data
+    refuse sql.nonFiniteError?
     _ ← execCounting (sql.toString .postgres)
   insertReturning {table} data := do
     let sql : SQL.Insert := { SQL.Insert.fromInsert data with returning := SQL.columnNames table }
+    refuse sql.nonFiniteError?
     decodeRows (Table.view table) (← rowsOf (sql.toString .postgres))
   update {_table} upd := do
     let sql : SQL.Update := .fromUpdate upd
     -- An `UPDATE` with no assignment is not a statement; it also changes nothing.
     if sql.assignments.isEmpty then
       return 0
+    refuse sql.nonFiniteError?
     execCounting sql.toString
   updateReturning {table} upd := do
     let sql : SQL.Update := { SQL.Update.fromUpdate upd with returning := SQL.columnNames table }
     if sql.assignments.isEmpty then
       return #[]
+    refuse sql.nonFiniteError?
     decodeRows (Table.view table) (← rowsOf sql.toString)
   delete {_table} del := do
     let sql : SQL.Delete := .fromDelete del
+    refuse sql.nonFiniteError?
     execCounting sql.toString
   deleteReturning {table} del := do
     let sql : SQL.Delete := { SQL.Delete.fromDelete del with returning := SQL.columnNames table }
+    refuse sql.nonFiniteError?
     decodeRows (Table.view table) (← rowsOf sql.toString)
 
 /-- Run a statement, ignoring its result. -/
@@ -173,6 +206,9 @@ def InformationSchema.column (info : InformationSchema) : Option Column := do
     | "integer" => pure DBType.int
     | "boolean" => pure DBType.bool
     | "text" => pure DBType.text
+    -- The name `DBType.toString` declares a float column with, and the one PostgreSQL reports for
+    -- it, so the two sides of the diff agree.
+    | "double precision" => pure DBType.float
     | "character varying" =>
       match info.character_maximum_length with
       | some n => pure <| DBType.varchar n.toNat

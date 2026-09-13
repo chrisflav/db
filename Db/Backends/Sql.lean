@@ -55,6 +55,10 @@ inductive Expr where
   | column (table column : String)
   | str (s : String)
   | int (n : Int)
+  /-- A floating-point literal, rendered at seventeen significant digits of the exact binary value
+  so that the database stores what was written. NaN and the infinities have no literal in either
+  dialect, and a statement holding one is refused before it runs; see `Expr.nonFiniteFloat?`. -/
+  | float (x : Float)
   | add (e₁ e₂ : Expr)
   | sub (e₁ e₂ : Expr)
   | mul (e₁ e₂ : Expr)
@@ -205,6 +209,15 @@ partial def Expr.toString : Expr → String
   | .var name => quoteIdent name
   | .str s => quoteString s
   | .int n => ToString.toString n
+  -- A NaN or an infinity is not a number either dialect can be told about — SQLite has no literal
+  -- for one at all, and PostgreSQL's `'NaN'::double precision` is a cast of a string. There is
+  -- therefore nothing to render, and this used to say so with a `panic!`: a backtrace interleaved
+  -- with the program's own output, a statement left reading `VALUES ()`, and a database error
+  -- naming neither the column nor the value. The backends look for such a value before they run a
+  -- statement (`Select.nonFiniteError?` and the three beside it) and refuse it by name, so this is
+  -- not reached; a printer stays a printer, and what it prints for one is Lean's own spelling,
+  -- which is not SQL either database will quietly accept.
+  | .float x => x.toDecimalString
   | .add e₁ e₂ => s!"({e₁.toString}) + ({e₂.toString})"
   | .sub e₁ e₂ => s!"({e₁.toString}) - ({e₂.toString})"
   | .mul e₁ e₂ => s!"({e₁.toString}) * ({e₂.toString})"
@@ -288,11 +301,77 @@ partial def Select.toString (s : Select) : String :=
 
 end
 
+mutual
+
+/-- The first NaN or infinite float literal the expression contains, if it contains one.
+
+Neither dialect has a literal for such a value — SQLite has none at all, and PostgreSQL's
+`'NaN'::double precision` is a cast of a string rather than a number — so a statement carrying one
+is a statement that cannot be written down. The backends look for it before they run anything, so
+that what the caller is told names the value rather than being the database's complaint about SQL
+that was never going to parse. -/
+partial def Expr.nonFiniteFloat? : Expr → Option Float
+  | .float x => if x.isFinite then none else some x
+  | .eq e₁ e₂ | .ne e₁ e₂ | .lt e₁ e₂ | .le e₁ e₂ | .gt e₁ e₂ | .ge e₁ e₂
+  | .and e₁ e₂ | .or e₁ e₂ | .add e₁ e₂ | .sub e₁ e₂ | .mul e₁ e₂ =>
+    e₁.nonFiniteFloat? <|> e₂.nonFiniteFloat?
+  | .not e | .isNull e | .isNotNull e | .like e _ => e.nonFiniteFloat?
+  | .inList e values => e.nonFiniteFloat? <|> values.findSome? Expr.nonFiniteFloat?
+  | .inSelect e sel => e.nonFiniteFloat? <|> sel.nonFiniteFloat?
+  | .scalar sel => sel.nonFiniteFloat?
+  | .aggregate _ _ arg => arg.bind Expr.nonFiniteFloat?
+  | .true | .false | .column .. | .var _ | .str _ | .int _ | .null => none
+
+partial def Selector.nonFiniteFloat? : Selector → Option Float
+  | .all => none
+  | .fields fs => fs.findSome? fun f => f.2.nonFiniteFloat?
+
+partial def JoinConnect.nonFiniteFloat? : JoinConnect → Option Float
+  | .onCondition cond => cond.nonFiniteFloat?
+  | .usingColumn .. => none
+
+partial def From.nonFiniteFloat? : From → Option Float
+  | .tableName .. => none
+  | .select sel _ => sel.nonFiniteFloat?
+  | .join left right _ connect =>
+    left.nonFiniteFloat? <|> right.nonFiniteFloat? <|> connect.nonFiniteFloat?
+  | .naturalJoin left right _ | .crossJoin left right =>
+    left.nonFiniteFloat? <|> right.nonFiniteFloat?
+
+partial def CTE.nonFiniteFloat? (c : CTE) : Option Float :=
+  c.base.nonFiniteFloat? <|> c.step.bind Select.nonFiniteFloat?
+
+partial def Select.nonFiniteFloat? (s : Select) : Option Float :=
+  s.selector.nonFiniteFloat? <|> s.from_.nonFiniteFloat? <|> s.condition.nonFiniteFloat? <|>
+    s.groupBy.findSome? Expr.nonFiniteFloat? <|>
+    s.orderBy.findSome? (fun k => k.expr.nonFiniteFloat?) <|>
+    s.ctes.findSome? CTE.nonFiniteFloat?
+
+end
+
+/-- Why a statement holding `x` cannot be run, naming the column the value belongs to where the
+statement has a name for it. -/
+def nonFiniteFloatError (column? : Option String) (x : Float) : String :=
+  letI value := if x.isNaN then "NaN" else "infinite"
+  letI subject :=
+    match column? with
+    | some column => s!"the value of `{column}`"
+    | none => "a value of the statement"
+  s!"{subject} is {value}, which has no SQL literal: SQLite has none at all, and PostgreSQL's " ++
+    "`'NaN'::double precision` is a cast of a string rather than a number. Store a finite " ++
+    "value, or leave the column to its default."
+
+/-- Why this `SELECT` cannot be rendered, if it cannot: a condition or a computed column holding a
+value neither dialect has a literal for. -/
+def Select.nonFiniteError? (sel : Select) : Option String :=
+  (sel.nonFiniteFloat?).map (nonFiniteFloatError none)
+
 def Expr.ofDBTypeValue {t : DBType} (x : t.Value) : Expr :=
   match t with
   | .int => .int x
   | .varchar _ => .str x
   | .text => .str x
+  | .float => .float x
   | .bool => if x then .true else .false
 
 def Expr.ofValue {c : Column} (x : c.Value) : Expr :=
@@ -466,7 +545,9 @@ partial def Expr.fromExpr {d : Database} {view : View d} {t : DBType}
   | .sub e₁ e₂ => return .sub (← Expr.fromExpr env e₁) (← Expr.fromExpr env e₂)
   | .mul e₁ e₂ => return .mul (← Expr.fromExpr env e₁) (← Expr.fromExpr env e₂)
   | .str s => pure (.str s.1)
+  | .text s => pure (.str s)
   | .int n => pure (.int n)
+  | .float x => pure (.float x)
   | .null _ => pure .null
   | .var idx _ _ => pure (env idx)
 
@@ -723,6 +804,12 @@ def Insert.sqliteError? (ins : Insert) : Option String :=
       "at least one column, or use `.ignore`."
   | _, _ => none
 
+/-- Why this insert cannot be rendered, if it cannot. The statement names the column each value
+belongs to, so the error can too. -/
+def Insert.nonFiniteError? (ins : Insert) : Option String :=
+  ins.values.findSome? fun (column, e) =>
+    (e.nonFiniteFloat?).map (nonFiniteFloatError (some column))
+
 /-- The statement, in `dialect`.
 
 The dialect is needed only for an insert that supplies no column: `DEFAULT VALUES` followed by
@@ -765,6 +852,13 @@ def Update.toString (upd : Update) : String :=
   s!"UPDATE {quoteQualified upd.table} SET {sets} WHERE {upd.condition.toString}" ++
     returningClause upd.returning
 
+/-- Why this update cannot be rendered, if it cannot. An assignment names its column; the condition
+does not, and is reported without one. -/
+def Update.nonFiniteError? (upd : Update) : Option String :=
+  (upd.assignments.findSome? fun (column, e) =>
+      (e.nonFiniteFloat?).map (nonFiniteFloatError (some column))) <|>
+    (upd.condition.nonFiniteFloat?).map (nonFiniteFloatError none)
+
 /-- The environment a statement that writes one table translates its expressions in: a column is
 the bare, unqualified name the table declares. An `UPDATE` or a `DELETE` names exactly one table
 and gives it no alias, so there is nothing to qualify the name with. -/
@@ -798,16 +892,30 @@ def Delete.toString (del : Delete) : String :=
   s!"DELETE FROM {quoteQualified del.fromTable} WHERE {del.condition.toString}" ++
     returningClause del.returning
 
+/-- Why this delete cannot be rendered, if it cannot: a condition holding a value neither dialect
+has a literal for. -/
+def Delete.nonFiniteError? (del : Delete) : Option String :=
+  (del.condition.nonFiniteFloat?).map (nonFiniteFloatError none)
+
 def Delete.fromDelete {d : Database} {tableName : d.Index} (del : d.Delete tableName) :
     Delete where
   fromTable := ToString.toString tableName
   condition := (Expr.fromExpr (tableEnv tableName) del.condition).run' 0
 
+/-- The SQL type name a column of this `DBType` is declared with.
+
+One spelling serves both dialects, which is what keeps this independent of the `Dialect`. For
+`float` that spelling is `double precision`: it is PostgreSQL's own name for the type — and the
+name it reports back for it, so introspection there sees what was declared — while SQLite takes any
+type name and derives an affinity from it, giving a declared type containing `DOUB` the same `REAL`
+affinity that the word `REAL` would. SQLite reports the declared text back verbatim, so `double
+precision` round-trips there too, which is what `autoUpdate` needs to reach a fixed point. -/
 def DBType.toString : DBType → String
   | .int => "integer"
   | .varchar n => s!"varchar({n})"
   | .text => "text"
   | .bool => "bool"
+  | .float => "double precision"
 
 /-- A column default, as it is written in a `CREATE TABLE`. A call is parenthesised, which SQLite
 requires and PostgreSQL accepts. -/
@@ -833,8 +941,12 @@ disambiguates the literals that several types spell the same way, such as `0`.
 
 Anything that is not a literal of the column's type is an expression, since that is what the
 databases report for one: SQLite strips the parentheses a call was declared with, and PostgreSQL
-casts and constant-folds what it reports. Two expression defaults compare equal, so recognising one
-as an expression is all that is needed of it.
+casts and constant-folds what it reports. Recognising one as an expression is all that is needed of
+it, because the migration diff compares columns with `BEq Column`, which holds any two `.call`
+defaults to be equal — the text a database reports for an expression is not the text it was
+declared with, and nothing here could make it be. Recognising a *literal* as one, on the other
+hand, is load-bearing: a literal is compared by its value, so one read back as an expression would
+differ from the declaration for ever.
 -/
 def ColumnDefault.parse? (t : DBType) (raw : String) : Option ColumnDefault :=
   letI s := raw.trimAscii.toString
@@ -868,6 +980,16 @@ def ColumnDefault.parse? (t : DBType) (raw : String) : Option ColumnDefault :=
     | .varchar _ | .text =>
       match unquoted? with
       | some literal => some (.str literal)
+      | none => asCall
+    -- `ColumnDefault` has no floating-point literal: it derives `DecidableEq` and `Hashable`, and
+    -- `Float` has neither. What it does have is `.int`, which is a perfectly good default for a
+    -- float column — both dialects widen the literal — and which has to be read back as the `.int`
+    -- it was declared as, exactly as on an integer column: parsed as an expression instead, the
+    -- declared `.int 0` and the reported `.call "0"` differ and `autoUpdate` proposes the same
+    -- `ALTER COLUMN` on every run. Anything else is an expression, `.call "0.5"`.
+    | .float =>
+      match (unquoted?.getD s).toInt? with
+      | some n => some (.int n)
       | none => asCall
 
 /-- Strip the explicit type cast PostgreSQL appends to the column default it reports, e.g. the

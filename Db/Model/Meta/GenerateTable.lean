@@ -152,6 +152,10 @@ instance : HasDBType String where
   type := .text
   encoding := Equiv.refl _
 
+instance : HasDBType Float where
+  type := .float
+  encoding := Equiv.refl _
+
 instance : HasColumn AutoKey where
   column := { type := .int, nullable := false, autoIncrement := true }
   encoding := Equiv.refl _
@@ -213,8 +217,16 @@ def generateHasTable (decl indexName tableName : Name) : CommandElabM Unit := do
     Meta.mkAppOptM ``HasTable.mk #[none, Expr.const tableName [], equiv]
   elabInstance inst
 
-/-- Generate a `Table` for structure named `decl`. -/
-def generateTable (decl : Name) : CommandElabM Unit := do
+/--
+Generate a `Table` for structure named `decl`.
+
+`declaredKey` is the primary key the `@[model]` attribute named, as field names in the order they
+are to be the key in; empty for a model that names none, whose key is then its `AutoKey` field, if
+it has one, and nothing otherwise. A name that is not a field, a name given twice, a key beside an
+`AutoKey` field, and a key over an `Option` field are all refused here, where the attribute is
+written, rather than in the schema they would produce.
+-/
+def generateTable (decl : Name) (declaredKey : List String := []) : CommandElabM Unit := do
   let names ← getStructureArgs decl
   let indexName : Name := (s!"{decl}Index").toName
   let tableName : Name := (s!"{decl}Table").toName
@@ -233,10 +245,43 @@ def generateTable (decl : Name) : CommandElabM Unit := do
     throwError m!"`{decl}` has more than one `AutoKey` field: \
       {String.intercalate ", " (keyFields.map (·.1.toString))}. A generated key has to be \
       the whole primary key, so at most one is allowed."
+  -- A declared key names fields, in the order they are the key in. It is checked here rather than
+  -- left to produce a `CREATE TABLE` naming a column that is not there.
+  unless declaredKey.isEmpty do
+    if !keyFields.isEmpty then
+      throwError m!"`{decl}` declares a `primaryKey` over \
+        {String.intercalate ", " (declaredKey.map (s!"`{·}`"))} and has the `AutoKey` field \
+        `{keyFields.head!.1}`. A generated key has to be the whole primary key, so the two cannot \
+        be combined: drop one of them."
+    let mut seen : List String := []
+    for name in declaredKey do
+      let some field := names.find? (·.1.toString == name)
+        | throwError m!"`{decl}` has no field `{name}`, which its `primaryKey` names. Its fields \
+            are: {String.intercalate ", " (names.map (·.1.toString))}."
+      if seen.contains name then
+        throwError m!"`{decl}` names the field `{name}` twice in its `primaryKey`."
+      -- An `Option` field is a nullable column, and a nullable primary key is not a key either
+      -- backend keeps: PostgreSQL makes such a column `NOT NULL` behind the declaration, which
+      -- introspection then reports back and `autoUpdate` proposes to undo on every run — with a
+      -- `DROP NOT NULL` PostgreSQL refuses, so the schema never converges. SQLite is the other
+      -- failure: it lets a `NULL` into a key column, so two rows whose key is `none` are two rows
+      -- and `save` stores both.
+      if field.2.isAppOf ``Option then
+        throwError m!"the field `{name}` of `{decl}` is an `Option`, so it is a nullable column, \
+          and its `primaryKey` names it. A primary key cannot be nullable: PostgreSQL makes such \
+          a column `NOT NULL` behind the declaration and then refuses the `DROP NOT NULL` \
+          `autoUpdate` proposes on every later run, and SQLite lets two rows carry `NULL` there, \
+          which is two rows under one key. Drop the `Option`, or key the model on another field."
+      seen := name :: seen
+  -- The key as indices of the generated index type: the declared fields in the order given, or the
+  -- generated one, or nothing.
+  let keyIndices : List Name :=
+    if declaredKey.isEmpty then keyFields.map (·.1)
+    else declaredKey.filterMap fun name => (names.find? (·.1.toString == name)).map (·.1)
   -- Construct `Table` and add to environment
   let table : Expr ← liftTermElabM <| do
     let idx : Expr := .const indexName []
-    let primaryKey ← List.asExpr idx (keyFields.map fun (n, _) => .const (indexName ++ n) [])
+    let primaryKey ← List.asExpr idx (keyIndices.map fun n => .const (indexName ++ n) [])
     let unique ← Meta.mkAppOptM ``List.nil #[some (← Meta.mkAppM ``List #[idx])]
     let foreignKeys ← Meta.mkAppOptM ``List.nil #[some (← Meta.mkAppM ``ForeignKey #[idx])]
     -- A model declares no indexes: they are attached to the table afterwards, since which of a

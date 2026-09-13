@@ -60,7 +60,15 @@ def Row.textD (row : Row) (name : String) (fallback : String) : String :=
 
 /-- Run a `SELECT` statement and return the resulting rows. This matches the representation the
 query interpretation expects: values are decoded from strings via `Column.ofRawValue?`, exactly as
-in the PostgreSQL backend. -/
+in the PostgreSQL backend.
+
+A value SQLite holds as a floating-point number is the one exception to reading everything as text.
+SQLite converts a `REAL` to text at fifteen significant digits, one short of the seventeen a double
+needs: `0.30000000000000004` comes back as `0.3`, `123456789.123456789` loses its last two digits,
+and the largest double comes back rounded up to an infinity. So such a value is read as a double
+and printed here instead, by the printer that does round-trip. Which columns those are is not known
+from the schema — SQLite stores what it was given, whatever the column was declared as — so it is
+the value's own runtime type that decides, read before anything converts it. -/
 def query (sql : String) : M (Array Row) := do
   let db ← read
   let stmt ← db.prepare sql
@@ -70,10 +78,12 @@ def query (sql : String) : M (Array Row) := do
     let mut row : Row := ∅
     for i in [0:ncols] do
       let name ← stmt.columnName (Int32.ofNat i)
-      let val ← if (← stmt.columnNull (Int32.ofNat i)) then
-          pure none
-        else
-          some <$> stmt.columnText (Int32.ofNat i)
+      let val ← match ← stmt.columnType (Int32.ofNat i) with
+        | .null => pure none
+        | .float => do
+          let x ← stmt.columnDouble (Int32.ofNat i)
+          pure (some (Float.toDecimalString x))
+        | _ => some <$> stmt.columnText (Int32.ofNat i)
       row := row.insert name val
     rows := rows.push row
   return rows
@@ -97,20 +107,29 @@ def decodeRows {d : Database} (view : View d) (rows : Array Row) : M (Array view
       | throw (IO.userError "SQLite backend: the result is missing a column.")
     return { value := value }
 
+/-- Refuse a statement this backend cannot run, saying why, before anything is sent to the
+database. `SQL.Insert.sqliteError?` and the `nonFiniteError?` of each statement are what produce the
+reason; a statement with none is run as it stands. -/
+def refuse (reason? : Option String) : M Unit :=
+  match reason? with
+  | some reason => throw <| IO.userError s!"SQLite backend: {reason}"
+  | none => pure ()
+
 instance (d : Database) : DBMonad d M where
   lookup {view} q := do
     let sql : SQL.Select := .fromQuery q
+    refuse sql.nonFiniteError?
     decodeRows view (← query sql.toString)
   insert {_table} data := do
     let db ← read
     let sql : SQL.Insert := .fromInsert data
-    if let some reason := sql.sqliteError? then
-      throw <| IO.userError s!"SQLite backend: {reason}"
+    refuse sql.sqliteError?
+    refuse sql.nonFiniteError?
     db.exec (sql.toString .sqlite)
   insertReturning {table} data := do
     let sql : SQL.Insert := { SQL.Insert.fromInsert data with returning := SQL.columnNames table }
-    if let some reason := sql.sqliteError? then
-      throw <| IO.userError s!"SQLite backend: {reason}"
+    refuse sql.sqliteError?
+    refuse sql.nonFiniteError?
     decodeRows (Table.view table) (← query (sql.toString .sqlite))
   update {_table} upd := do
     let db ← read
@@ -118,6 +137,7 @@ instance (d : Database) : DBMonad d M where
     -- An `UPDATE` with no assignment is not a statement; it also changes nothing.
     if sql.assignments.isEmpty then
       return 0
+    refuse sql.nonFiniteError?
     db.exec sql.toString
     -- `changes` reports the number of rows affected by the last statement.
     return (← db.changes).toInt.toNat
@@ -125,14 +145,17 @@ instance (d : Database) : DBMonad d M where
     let sql : SQL.Update := { SQL.Update.fromUpdate upd with returning := SQL.columnNames table }
     if sql.assignments.isEmpty then
       return #[]
+    refuse sql.nonFiniteError?
     decodeRows (Table.view table) (← query sql.toString)
   delete {_table} del := do
     let db ← read
     let sql : SQL.Delete := .fromDelete del
+    refuse sql.nonFiniteError?
     db.exec sql.toString
     return (← db.changes).toInt.toNat
   deleteReturning {table} del := do
     let sql : SQL.Delete := { SQL.Delete.fromDelete del with returning := SQL.columnNames table }
+    refuse sql.nonFiniteError?
     decodeRows (Table.view table) (← query sql.toString)
 
 instance : DBMonadTransactional M where
@@ -189,7 +212,12 @@ def parseForeignKeyAction (s : String) : ForeignKeyAction :=
   | _ => .noAction
 
 /-- Parse a SQLite declared column type back into a `DBType`. SQLite preserves the declared type
-string, so the types emitted by `DBType.toString` (`integer`, `varchar(n)`, `bool`) round-trip. -/
+string, so the types emitted by `DBType.toString` (`integer`, `varchar(n)`, `bool`,
+`double precision`) round-trip.
+
+The floating-point spellings are all of the ones SQLite gives `REAL` affinity to, since a table
+created by hand or by an earlier schema may declare any of them and they mean the same thing
+here. -/
 def parseDBType (s : String) : Option DBType :=
   let low := s.toLower
   if low == "integer" || low == "int" then
@@ -198,6 +226,8 @@ def parseDBType (s : String) : Option DBType :=
     some .bool
   else if low == "text" then
     some .text
+  else if low == "double precision" || low == "double" || low == "real" || low == "float" then
+    some .float
   else if low.startsWith "varchar" || low.startsWith "character varying" then
     match low.splitOn "(" with
     | [_, rest] =>
@@ -524,8 +554,7 @@ instance : DBMonadWithMigrations M where
     match SQL.Migration.Operation.fromDatabaseOperation op with
     | .createTable cmd =>
       -- Rejected here rather than rendered into a table with a key nobody declared.
-      if let some reason := cmd.sqliteError? then
-        throw <| IO.userError s!"SQLite backend: {reason}"
+      refuse cmd.sqliteError?
       db.exec (cmd.toString .sqlite)
     | .dropTable cmd => db.exec cmd.toString
     | .renameTable cmd => db.exec cmd.toString

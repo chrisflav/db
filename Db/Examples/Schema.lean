@@ -59,6 +59,67 @@ structure Node where
   title : VarChar 100
   deriving Repr
 
+/-- A measurement: a `Float` field, which becomes a `float` column, and an `Option Float`, which
+becomes a nullable one.
+
+Part of the shared schema for the same reason `node` is: `autoUpdate` drops the tables its target
+does not declare, and the PostgreSQL demos share one database. -/
+@[model (dbName := "sample") mydb]
+structure Sample where
+  id : AutoKey
+  value : Float
+  margin : Option Float
+  deriving Repr
+
+/-- A record keyed by an id its writer chooses rather than by one the database assigns: the key is
+declared on the attribute, over a field of the structure. -/
+@[model (dbName := "profile") (primaryKey := ["handle"]) mydb]
+structure Profile where
+  handle : String
+  displayName : String
+  visits : Int
+  deriving Repr
+
+/-- A composite key, in the order the two fields are named in. -/
+@[model (dbName := "event") (primaryKey := ["session", "seq"]) mydb]
+structure Event where
+  session : String
+  seq : Int
+  body : String
+  deriving Repr
+
+/-- A model every column of which is part of its key, which leaves `HasModel.save` nothing to set:
+the row that is already there is the row being written. -/
+@[model (dbName := "membership") (primaryKey := ["groupName", "member"]) mydb]
+structure Membership where
+  groupName : String
+  member : String
+  deriving Repr
+
+section KeyChecks
+
+-- A field the key names has to be a column that can hold the key: an `Option` is a nullable
+-- column, which PostgreSQL makes `NOT NULL` behind the declaration — leaving `autoUpdate` to
+-- propose a `DROP NOT NULL` PostgreSQL then refuses, on every run — and which SQLite fills with
+-- `NULL`s that do not conflict with each other, so two `save`s of `none` store two rows. Rejected
+-- where the key is written, rather than in a schema neither backend keeps.
+-- `whitespace := lax` only so that the expected message can be wrapped here as the source around
+-- it is; the message itself is one line.
+/--
+error: the field `handle` of `BookExample.NullableKey` is an `Option`, so it is a nullable column,
+and its `primaryKey` names it. A primary key cannot be nullable: PostgreSQL makes such a column
+`NOT NULL` behind the declaration and then refuses the `DROP NOT NULL` `autoUpdate` proposes on
+every later run, and SQLite lets two rows carry `NULL` there, which is two rows under one key. Drop
+the `Option`, or key the model on another field.
+-/
+#guard_msgs (whitespace := lax) in
+@[model (dbName := "nullableKey") (primaryKey := ["handle"]) mydb]
+structure NullableKey where
+  handle : Option String
+  body : String
+
+end KeyChecks
+
 section Identifiers
 
 /-- A table that is nothing but awkward names: a mixed-case table name, a mixed-case column, and
