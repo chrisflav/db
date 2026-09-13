@@ -486,9 +486,14 @@ back what either prints — `0.1`, `-3`, `1e-07`, `1.0e+20`, `1E5`, `.5` — and
 `Infinity` and `NaN` besides, so that a row holding one is reported rather than refused.
 
 `ColumnDefault` has no floating-point literal: it derives `DecidableEq` and `Hashable`, and `Float`
-has neither. A default on a float column is written as an expression instead, `.call "0.0"`, which
-is also what makes it converge — two expression defaults compare equal however the database
-rewrites the text of one, where a literal would have to survive the rewriting.
+has neither. A whole number is still a default a float column can have — `.int 0`, which both
+dialects widen to the column's type and which `ColumnDefault.parse?` reads back as the `.int` it
+was declared as, so it round-trips as itself. Anything else is written as an expression,
+`.call "0.5"`, and what makes an expression default converge is not its text but the comparison the
+migration diff makes: `BEq Column` treats any two `.call` defaults as equal, so a database that
+rewrites the text of one — as PostgreSQL does — does not thereby make the column differ from what
+was declared. The price is the one the paragraph on defaults below states, that a change to an
+expression default is not migrated.
 
 A column may declare a `default?`, which the database fills in when an insert omits it:
 

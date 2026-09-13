@@ -895,10 +895,15 @@ def ColumnDefault.parse? (t : DBType) (raw : String) : Option ColumnDefault :=
       | some literal => some (.str literal)
       | none => asCall
     -- `ColumnDefault` has no floating-point literal: it derives `DecidableEq` and `Hashable`, and
-    -- `Float` has neither. A default on a float column is therefore always an expression, which is
-    -- what makes it round-trip — declare it as `.call "0.0"` and the two compare equal however the
-    -- database rewrites the text.
-    | .float => asCall
+    -- `Float` has neither. What it does have is `.int`, which is a perfectly good default for a
+    -- float column — both dialects widen the literal — and which has to be read back as the `.int`
+    -- it was declared as, exactly as on an integer column: parsed as an expression instead, the
+    -- declared `.int 0` and the reported `.call "0"` differ and `autoUpdate` proposes the same
+    -- `ALTER COLUMN` on every run. Anything else is an expression, `.call "0.5"`.
+    | .float =>
+      match (unquoted?.getD s).toInt? with
+      | some n => some (.int n)
+      | none => asCall
 
 /-- Strip the explicit type cast PostgreSQL appends to the column default it reports, e.g. the
 `::character varying` of `'open'::character varying`.

@@ -1009,7 +1009,11 @@ def gaugeDb : DatabaseRecipe where
     [("gauge",
       { columns := .ofList
           [("id", { type := .int, nullable := false }),
-           ("reading", { type := .float, nullable := false, default? := some (.call "0.0") })]
+           ("reading", { type := .float, nullable := false, default? := some (.call "0.0") }),
+           -- An integer literal is a default a float column can have — both dialects widen it —
+           -- and it has to be read back as the `.int` it was declared as. Parsed as an expression
+           -- it would differ from the declaration on every run.
+           ("offset", { type := .float, nullable := false, default? := some (.int 0) })]
         primaryKey := ["id"] })]
 
 /-- `save` on a model with no primary key has nothing to conflict on, so it says so rather than
@@ -1037,15 +1041,23 @@ def saveWithGeneratedKeyDemo : Sqlite.M Unit := do
       IO.println s!"refused, as expected: {e}"
   IO.println s!"rows in `tag` after two saves: {← HasModel.count (QuerySet.all (α := Tag))}"
 
-/-- A default on a float column reaches a fixed point too. -/
+/-- A default on a float column reaches a fixed point too: the expression default of `reading` and
+the integer one of `offset` both have to come back as what was declared, or `autoUpdate` proposes
+the same `ALTER COLUMN` for ever and `makemigrations` writes a migration that changes nothing. -/
 def floatDefaultDemo : Sqlite.M Unit := do
   autoUpdate gaugeDb
   autoUpdate gaugeDb
   let current ← currentDatabase
-  IO.println <|
-    s!"pending operations on `gauge` after two autoUpdates: {(current.operations gaugeDb).size}"
-  IO.println <| s!"the type and default read back for `gauge`.`reading`: " ++
-    s!"{repr ((current.tables["gauge"]?.bind (·.columns["reading"]?)).map fun c => (c.type, c.default?))}"
+  let pending := (current.operations gaugeDb).size
+  IO.println s!"pending operations on `gauge` after two autoUpdates: {pending}"
+  unless pending == 0 do
+    throw <| IO.userError <|
+      s!"two autoUpdates against `gaugeDb` left {pending} operation(s) pending, so a float " ++
+      "default does not round-trip"
+  let readBack : String → String := fun column =>
+    s!"{repr ((current.tables["gauge"]?.bind (·.columns[column]?)).map fun c => (c.type, c.default?))}"
+  IO.println s!"the type and default read back for `gauge`.`reading`: {readBack "reading"}"
+  IO.println s!"the type and default read back for `gauge`.`offset`: {readBack "offset"}"
 
 /-- Change `mig_book.year` from an integer to text. SQLite realises a column type change by
 rebuilding the table, which is why this exists in two versions: the atomic one cannot work there,
