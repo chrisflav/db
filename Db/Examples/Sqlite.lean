@@ -997,10 +997,12 @@ def modelConflictDemo : Sqlite.M Unit := do
 
 end ModelConflicts
 
-/-- A hand-written table with a default on its float column. `ColumnDefault` has no floating-point
-literal — it derives `DecidableEq` and `Hashable`, and `Float` has neither — so such a default is
-an expression, which is also what makes it converge: two expression defaults compare equal however
-the database rewrites the text of one.
+/-- A hand-written table with two defaults on float columns. `ColumnDefault` has no floating-point
+literal — it derives `DecidableEq` and `Hashable`, and `Float` has neither — so a fractional
+default is an expression, and what makes an expression converge is the comparison rather than the
+text: `BEq Column`, which the migration diff uses, holds any two `.call` defaults to be equal,
+however the database rewrites the text of one. An integer default is a literal like any other, and
+has to come back as the `.int` it was declared as.
 
 A database of its own, which only the SQLite suite can afford: `autoUpdate` drops the tables its
 target does not declare, and every demo here runs against a fresh in-memory database. -/

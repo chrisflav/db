@@ -521,8 +521,11 @@ The SQL text of a `.call` default is passed to the backend unchanged, so it has 
 target database knows — `unixepoch()` is SQLite's, PostgreSQL spells it differently. Defaults are
 read back by schema introspection so that `autoUpdate` reaches a fixed point. Since a database
 rewrites the text of an expression default when it reports it back (PostgreSQL reports a declared
-`abs(-1)` as `abs('-1'::integer)`), two expression defaults are compared as equal, and a change to
-one is not migrated.
+`abs(-1)` as `abs('-1'::integer)`), the `BEq Column` the migration diff compares columns with holds
+any two `.call` defaults to be equal — not `ColumnDefault`'s own equality, which is textual like
+any derived one. So a change to an expression default is not migrated, and a default that is *not*
+an expression has to be read back as the literal it was declared as, or the column differs from its
+declaration on every run.
 
 Values read from a database keep `NULL` apart from the empty string: the backends use the driver's
 null flag rather than treating an empty result as `NULL`, which matters as soon as a column holds

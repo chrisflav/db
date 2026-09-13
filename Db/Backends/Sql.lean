@@ -858,8 +858,12 @@ disambiguates the literals that several types spell the same way, such as `0`.
 
 Anything that is not a literal of the column's type is an expression, since that is what the
 databases report for one: SQLite strips the parentheses a call was declared with, and PostgreSQL
-casts and constant-folds what it reports. Two expression defaults compare equal, so recognising one
-as an expression is all that is needed of it.
+casts and constant-folds what it reports. Recognising one as an expression is all that is needed of
+it, because the migration diff compares columns with `BEq Column`, which holds any two `.call`
+defaults to be equal — the text a database reports for an expression is not the text it was
+declared with, and nothing here could make it be. Recognising a *literal* as one, on the other
+hand, is load-bearing: a literal is compared by its value, so one read back as an expression would
+differ from the declaration for ever.
 -/
 def ColumnDefault.parse? (t : DBType) (raw : String) : Option ColumnDefault :=
   letI s := raw.trimAscii.toString
