@@ -107,20 +107,29 @@ def decodeRows {d : Database} (view : View d) (rows : Array Row) : M (Array view
       | throw (IO.userError "SQLite backend: the result is missing a column.")
     return { value := value }
 
+/-- Refuse a statement this backend cannot run, saying why, before anything is sent to the
+database. `SQL.Insert.sqliteError?` and the `nonFiniteError?` of each statement are what produce the
+reason; a statement with none is run as it stands. -/
+def refuse (reason? : Option String) : M Unit :=
+  match reason? with
+  | some reason => throw <| IO.userError s!"SQLite backend: {reason}"
+  | none => pure ()
+
 instance (d : Database) : DBMonad d M where
   lookup {view} q := do
     let sql : SQL.Select := .fromQuery q
+    refuse sql.nonFiniteError?
     decodeRows view (← query sql.toString)
   insert {_table} data := do
     let db ← read
     let sql : SQL.Insert := .fromInsert data
-    if let some reason := sql.sqliteError? then
-      throw <| IO.userError s!"SQLite backend: {reason}"
+    refuse sql.sqliteError?
+    refuse sql.nonFiniteError?
     db.exec (sql.toString .sqlite)
   insertReturning {table} data := do
     let sql : SQL.Insert := { SQL.Insert.fromInsert data with returning := SQL.columnNames table }
-    if let some reason := sql.sqliteError? then
-      throw <| IO.userError s!"SQLite backend: {reason}"
+    refuse sql.sqliteError?
+    refuse sql.nonFiniteError?
     decodeRows (Table.view table) (← query (sql.toString .sqlite))
   update {_table} upd := do
     let db ← read
@@ -128,6 +137,7 @@ instance (d : Database) : DBMonad d M where
     -- An `UPDATE` with no assignment is not a statement; it also changes nothing.
     if sql.assignments.isEmpty then
       return 0
+    refuse sql.nonFiniteError?
     db.exec sql.toString
     -- `changes` reports the number of rows affected by the last statement.
     return (← db.changes).toInt.toNat
@@ -135,14 +145,17 @@ instance (d : Database) : DBMonad d M where
     let sql : SQL.Update := { SQL.Update.fromUpdate upd with returning := SQL.columnNames table }
     if sql.assignments.isEmpty then
       return #[]
+    refuse sql.nonFiniteError?
     decodeRows (Table.view table) (← query sql.toString)
   delete {_table} del := do
     let db ← read
     let sql : SQL.Delete := .fromDelete del
+    refuse sql.nonFiniteError?
     db.exec sql.toString
     return (← db.changes).toInt.toNat
   deleteReturning {table} del := do
     let sql : SQL.Delete := { SQL.Delete.fromDelete del with returning := SQL.columnNames table }
+    refuse sql.nonFiniteError?
     decodeRows (Table.view table) (← query sql.toString)
 
 instance : DBMonadTransactional M where
@@ -541,8 +554,7 @@ instance : DBMonadWithMigrations M where
     match SQL.Migration.Operation.fromDatabaseOperation op with
     | .createTable cmd =>
       -- Rejected here rather than rendered into a table with a key nobody declared.
-      if let some reason := cmd.sqliteError? then
-        throw <| IO.userError s!"SQLite backend: {reason}"
+      refuse cmd.sqliteError?
       db.exec (cmd.toString .sqlite)
     | .dropTable cmd => db.exec cmd.toString
     | .renameTable cmd => db.exec cmd.toString

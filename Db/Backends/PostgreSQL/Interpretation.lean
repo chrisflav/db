@@ -94,32 +94,52 @@ def execCounting (sql : String) : M Nat := do
     IO.println s!"{repr e}"
     throw .fatal
 
+/-- Refuse a statement that cannot be rendered, saying why, before anything is sent to the server.
+
+The reason comes from the `nonFiniteError?` of the statement: a NaN or an infinity has no literal
+here either. PostgreSQL can *store* one, and `Float.ofDecimalString?` reads the `NaN` and `Infinity`
+it prints back, so a row read from a column another writer filled can hold a value this library
+will not write again — see the README. Spelling it `'NaN'::double precision` on this dialect alone
+would close that gap, at the price of threading a `Dialect` through the whole of `Expr.toString`,
+which renders one SQL for both backends today. -/
+def refuse (reason? : Option String) : M Unit :=
+  match reason? with
+  | some reason => throw (.userError reason)
+  | none => pure ()
+
 instance (d : Database) : DBMonad d M where
   lookup {view} q := do
     let sql : SQL.Select := .fromQuery q
+    refuse sql.nonFiniteError?
     decodeRows view (← rowsOf sql.toString)
   insert {_table} data := do
     let sql : SQL.Insert := .fromInsert data
+    refuse sql.nonFiniteError?
     _ ← execCounting (sql.toString .postgres)
   insertReturning {table} data := do
     let sql : SQL.Insert := { SQL.Insert.fromInsert data with returning := SQL.columnNames table }
+    refuse sql.nonFiniteError?
     decodeRows (Table.view table) (← rowsOf (sql.toString .postgres))
   update {_table} upd := do
     let sql : SQL.Update := .fromUpdate upd
     -- An `UPDATE` with no assignment is not a statement; it also changes nothing.
     if sql.assignments.isEmpty then
       return 0
+    refuse sql.nonFiniteError?
     execCounting sql.toString
   updateReturning {table} upd := do
     let sql : SQL.Update := { SQL.Update.fromUpdate upd with returning := SQL.columnNames table }
     if sql.assignments.isEmpty then
       return #[]
+    refuse sql.nonFiniteError?
     decodeRows (Table.view table) (← rowsOf sql.toString)
   delete {_table} del := do
     let sql : SQL.Delete := .fromDelete del
+    refuse sql.nonFiniteError?
     execCounting sql.toString
   deleteReturning {table} del := do
     let sql : SQL.Delete := { SQL.Delete.fromDelete del with returning := SQL.columnNames table }
+    refuse sql.nonFiniteError?
     decodeRows (Table.view table) (← rowsOf sql.toString)
 
 /-- Run a statement, ignoring its result. -/

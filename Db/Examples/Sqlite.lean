@@ -1043,6 +1043,40 @@ def saveWithGeneratedKeyDemo : Sqlite.M Unit := do
       IO.println s!"refused, as expected: {e}"
   IO.println s!"rows in `tag` after two saves: {← HasModel.count (QuerySet.all (α := Tag))}"
 
+/-- A NaN and an infinity have no literal in either dialect, so a statement carrying one is refused
+before it runs, naming the column it came from. It used to be a `panic!` inside the renderer: a
+backtrace on stderr, unordered against the program's own output, a statement left reading
+`VALUES ()`, and `near ")": syntax error` back from SQLite, which named neither the column nor the
+value. A condition is checked as well as a value, since a query can compare a column with one. -/
+def nonFiniteFloatDemo : Sqlite.M Unit := do
+  autoUpdate (%database mydb)
+  let nan := 0.0 / 0.0
+  let infinity := 1.0 / 0.0
+  let values := [("a NaN", nan), ("an infinity", infinity), ("a negative infinity", -infinity)]
+  for (label, x) in values do
+    try
+      HasModel.insert ({ id := 0, value := x, margin := none } : Sample)
+      IO.println s!"an insert of {label} was accepted, which it should not be."
+    catch e =>
+      IO.println s!"refused, as expected: {e}"
+  -- The same value in a condition rather than in a row.
+  try
+    let _ ← HasModel.delete (α := Sample) (.eq (.var SampleIndex.value .float) (.float nan))
+    IO.println "a delete on a NaN was accepted, which it should not be."
+  catch e =>
+    IO.println s!"refused, as expected: {e}"
+  -- Nothing of this reached the database: the statements were refused before they were run.
+  IO.println s!"rows in `sample`: {← HasModel.count (QuerySet.all (α := Sample))}"
+  -- And what SQLite does with such a value that reaches it another way. `9e999` overflows to an
+  -- infinity in SQLite's own parser, which a `REAL` column then keeps; a NaN it stores as `NULL`,
+  -- having nowhere to put it. So a row can come back holding a value the library will not write,
+  -- which is the asymmetry the README describes — on this side reporting it beats refusing to read
+  -- the row.
+  rawExecute "CREATE TABLE nonfinite (x REAL)"
+  rawExecute "INSERT INTO nonfinite VALUES (9e999), (9e999 - 9e999)"
+  for row in ← query "SELECT typeof(x) AS ty, CAST(x AS TEXT) AS v FROM nonfinite" do
+    IO.println s!"  SQLite stored it as {row.textD "ty" "?"}: {row.textD "v" "NULL"}"
+
 /-- A default on a float column reaches a fixed point too: the expression default of `reading` and
 the integer one of `offset` both have to come back as what was declared, or `autoUpdate` proposes
 the same `ALTER COLUMN` for ever and `makemigrations` writes a migration that changes nothing. -/
@@ -1057,7 +1091,8 @@ def floatDefaultDemo : Sqlite.M Unit := do
       s!"two autoUpdates against `gaugeDb` left {pending} operation(s) pending, so a float " ++
       "default does not round-trip"
   let readBack : String → String := fun column =>
-    s!"{repr ((current.tables["gauge"]?.bind (·.columns[column]?)).map fun c => (c.type, c.default?))}"
+    letI col := current.tables["gauge"]?.bind (·.columns[column]?)
+    s!"{repr (col.map fun c => (c.type, c.default?))}"
   IO.println s!"the type and default read back for `gauge`.`reading`: {readBack "reading"}"
   IO.println s!"the type and default read back for `gauge`.`offset`: {readBack "offset"}"
 
@@ -1196,6 +1231,7 @@ def test : IO Unit := do
   Sqlite.runDB ":memory:" modelConflictDemo
   Sqlite.runDB ":memory:" (FloatExample.floatDemo "SQLite")
   Sqlite.runDB ":memory:" floatDefaultDemo
+  Sqlite.runDB ":memory:" nonFiniteFloatDemo
   Sqlite.runDB ":memory:" (KeyExample.keyDemo "SQLite")
   Sqlite.runDB ":memory:" saveWithoutKeyDemo
   Sqlite.runDB ":memory:" saveWithGeneratedKeyDemo

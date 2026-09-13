@@ -470,9 +470,23 @@ a digit on either side of the point (`4.0`, never `4`), so that nothing a float 
 reads as an integer.
 
 NaN and the infinities have no literal in either dialect — SQLite has none at all, and
-PostgreSQL's `'NaN'::double precision` is a cast of a string rather than a number. Rendering one is
-therefore a panic, not a fallback: it names the value on stderr and leaves behind SQL the database
-refuses, rather than quietly storing something else.
+PostgreSQL's `'NaN'::double precision` is a cast of a string rather than a number. A statement
+carrying one is therefore refused by the backend before it is run, by the `nonFiniteError?` of the
+statement, and the error names the column the value belongs to. Rendering one used to be a `panic!`
+instead, which was worse in three ways at once: the backtrace went to stderr unordered against the
+program's own output, the statement was left reading `VALUES ()`, and what came back from SQLite
+was `near ")": syntax error`, naming neither the column nor the value. `Expr.toString` is a printer
+again, and prints Lean's own spelling of such a value, which no backend gets to see.
+
+What this leaves is an asymmetry on the reading side. PostgreSQL can *store* a NaN or an infinity
+in a `double precision` column, prints it as `NaN` or `Infinity`, and `Float.ofDecimalString?`
+reads both, so a row written by something else comes back carrying a value this library will not
+write again: reporting it beats refusing to read the row. Closing the gap would mean rendering
+`'NaN'::double precision` on the PostgreSQL dialect alone, and `Expr.toString` renders one SQL for
+both backends — the `Dialect` would have to be threaded through all of it. SQLite has the narrower
+version of the same gap: it has no literal for either value, but `9e999` overflows to an infinity
+in its own parser and a `REAL` column keeps that, while a NaN it stores as `NULL`, having nowhere
+to put it.
 
 Reading is the backends' own printing, and neither prints enough by default. SQLite converts a
 `REAL` to text at fifteen significant digits, so `0.30000000000000004` would come back as `0.3` and

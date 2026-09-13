@@ -103,10 +103,16 @@ section KeyChecks
 -- propose a `DROP NOT NULL` PostgreSQL then refuses, on every run — and which SQLite fills with
 -- `NULL`s that do not conflict with each other, so two `save`s of `none` store two rows. Rejected
 -- where the key is written, rather than in a schema neither backend keeps.
+-- `whitespace := lax` only so that the expected message can be wrapped here as the source around
+-- it is; the message itself is one line.
 /--
-error: the field `handle` of `BookExample.NullableKey` is an `Option`, so it is a nullable column, and its `primaryKey` names it. A primary key cannot be nullable: PostgreSQL makes such a column `NOT NULL` behind the declaration and then refuses the `DROP NOT NULL` `autoUpdate` proposes on every later run, and SQLite lets two rows carry `NULL` there, which is two rows under one key. Drop the `Option`, or key the model on another field.
+error: the field `handle` of `BookExample.NullableKey` is an `Option`, so it is a nullable column,
+and its `primaryKey` names it. A primary key cannot be nullable: PostgreSQL makes such a column
+`NOT NULL` behind the declaration and then refuses the `DROP NOT NULL` `autoUpdate` proposes on
+every later run, and SQLite lets two rows carry `NULL` there, which is two rows under one key. Drop
+the `Option`, or key the model on another field.
 -/
-#guard_msgs in
+#guard_msgs (whitespace := lax) in
 @[model (dbName := "nullableKey") (primaryKey := ["handle"]) mydb]
 structure NullableKey where
   handle : Option String

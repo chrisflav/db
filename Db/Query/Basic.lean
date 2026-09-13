@@ -673,7 +673,8 @@ inductive DBExpr (d : Database) : View d → DBType → Type 1 where
   | int {view : View d} (n : Int) : DBExpr d view .int
   /-- A floating-point literal. It is rendered at seventeen significant digits of the exact binary
   value, so that the database stores the value that was written rather than a rounding of it. NaN
-  and the infinities have no such literal; rendering one is an error, not a value. -/
+  and the infinities have no such literal, and a statement carrying one is refused by the backend
+  before it is run rather than rendered into SQL no database will parse. -/
   | float {view : View d} (x : Float) : DBExpr d view .float
   /-- The literal `NULL`, at a given type. -/
   | null {view : View d} (t : DBType) : DBExpr d view t
