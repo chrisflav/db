@@ -37,21 +37,26 @@ structure State where
 
 abbrev M := ExceptT Exception (StateT State IO)
 
+/-- Run `x` against the connection `s` holds, settling what the connection has to be set to first.
+
+Here rather than in `runDB` so that a caller that builds its own `State` — around a connection it
+opened itself, or one it keeps across several runs — gets the same connection, rather than one that
+reads floating-point columns short.
+
+That setting is `extra_float_digits`. Values come back as the text the server prints for them, so a
+`double precision` column is only read back exactly if the server prints all of its digits;
+`extra_float_digits` is 1 by default on PostgreSQL 12 and later, which already means "the shortest
+text that round-trips", while older servers default to 0, which is fifteen significant digits and
+loses the last bits of a double. Asking for the maximum says the same thing to both. The result is
+ignored: a server that will not take the setting is no reason to refuse the work. -/
 nonrec def M.run (s : State) {α : Type} (x : M α) : IO (Except Exception α) := do
+  let _ ← s.connection.exec "SET extra_float_digits = 3"
   return (← x.run.run s).1
 
 def runDB (connectionInfo : String) {α : Type} (x : M α) : IO (Except Exception α) := do
   let conn ← connect connectionInfo
   match conn with
-  | some conn =>
-    -- Values come back as the text the server prints for them, so a `double precision` column is
-    -- only read back exactly if the server prints all of its digits. `extra_float_digits` is 1 by
-    -- default on PostgreSQL 12 and later, which already means "the shortest text that round-trips";
-    -- older servers default to 0, which is fifteen significant digits and loses the last bits of a
-    -- double. Asking for the maximum says the same thing to both. The result is ignored: a server
-    -- that will not take the setting is no reason to refuse the connection.
-    let _ ← conn.exec "SET extra_float_digits = 3"
-    x.run { connectionInfo := connectionInfo, connection := conn }
+  | some conn => x.run { connectionInfo := connectionInfo, connection := conn }
   | none => return .error .connectionError
 
 /-- Decode the rows of a result into the entries of `view`.

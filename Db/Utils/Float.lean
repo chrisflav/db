@@ -78,8 +78,9 @@ the result back gives `x` again.
 
 There is always a digit on either side of the point, and never a bare integer: `4.0`, not `4`, so
 that a reader of the generated SQL — and the database parsing it — sees a floating-point literal
-rather than an integer one. Very large and very small magnitudes come out in exponent notation
-(`1.0e20`, `1.0e-7`).
+rather than an integer one. Very large and very small magnitudes come out in exponent notation:
+`1.0e20`, and `9.9999999999999995e-8` for the double nearest `1e-7` — the digits are those of the
+binary value, not of the decimal that was written down for it.
 
 `none` for NaN and the infinities, which have no literal in either dialect.
 -/

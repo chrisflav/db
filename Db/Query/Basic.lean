@@ -540,8 +540,9 @@ def AggregateFn.distinct : AggregateFn → Bool
   | .countDistinct => true
   | _ => false
 
-/-- Whether the function is defined on values of this type. Counting works on anything, `SUM` only
-on numbers, and `MIN`/`MAX` on everything the databases order, which excludes booleans. -/
+/-- Whether the function is defined on values of this type. Counting works on anything, `SUM` and
+`AVG` only on numbers, and `MIN`/`MAX` on everything the databases order, which excludes
+booleans. -/
 def AggregateFn.appliesTo : AggregateFn → DBType → Bool
   | .count, _ => true
   | .countDistinct, _ => true
