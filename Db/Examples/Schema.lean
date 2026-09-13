@@ -71,6 +71,31 @@ structure Sample where
   margin : Option Float
   deriving Repr
 
+/-- A record keyed by an id its writer chooses rather than by one the database assigns: the key is
+declared on the attribute, over a field of the structure. -/
+@[model (dbName := "profile") (primaryKey := ["handle"]) mydb]
+structure Profile where
+  handle : String
+  displayName : String
+  visits : Int
+  deriving Repr
+
+/-- A composite key, in the order the two fields are named in. -/
+@[model (dbName := "event") (primaryKey := ["session", "seq"]) mydb]
+structure Event where
+  session : String
+  seq : Int
+  body : String
+  deriving Repr
+
+/-- A model every column of which is part of its key, which leaves `HasModel.save` nothing to set:
+the row that is already there is the row being written. -/
+@[model (dbName := "membership") (primaryKey := ["groupName", "member"]) mydb]
+structure Membership where
+  groupName : String
+  member : String
+  deriving Repr
+
 section Identifiers
 
 /-- A table that is nothing but awkward names: a mixed-case table name, a mixed-case column, and

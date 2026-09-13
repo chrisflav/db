@@ -217,8 +217,14 @@ def generateHasTable (decl indexName tableName : Name) : CommandElabM Unit := do
     Meta.mkAppOptM ``HasTable.mk #[none, Expr.const tableName [], equiv]
   elabInstance inst
 
-/-- Generate a `Table` for structure named `decl`. -/
-def generateTable (decl : Name) : CommandElabM Unit := do
+/--
+Generate a `Table` for structure named `decl`.
+
+`declaredKey` is the primary key the `@[model]` attribute named, as field names in the order they
+are to be the key in; empty for a model that names none, whose key is then its `AutoKey` field, if
+it has one, and nothing otherwise.
+-/
+def generateTable (decl : Name) (declaredKey : List String := []) : CommandElabM Unit := do
   let names ← getStructureArgs decl
   let indexName : Name := (s!"{decl}Index").toName
   let tableName : Name := (s!"{decl}Table").toName
@@ -237,10 +243,31 @@ def generateTable (decl : Name) : CommandElabM Unit := do
     throwError m!"`{decl}` has more than one `AutoKey` field: \
       {String.intercalate ", " (keyFields.map (·.1.toString))}. A generated key has to be \
       the whole primary key, so at most one is allowed."
+  -- A declared key names fields, in the order they are the key in. It is checked here rather than
+  -- left to produce a `CREATE TABLE` naming a column that is not there.
+  unless declaredKey.isEmpty do
+    if !keyFields.isEmpty then
+      throwError m!"`{decl}` declares a `primaryKey` over \
+        {String.intercalate ", " (declaredKey.map (s!"`{·}`"))} and has the `AutoKey` field \
+        `{keyFields.head!.1}`. A generated key has to be the whole primary key, so the two cannot \
+        be combined: drop one of them."
+    let mut seen : List String := []
+    for name in declaredKey do
+      unless names.any (·.1.toString == name) do
+        throwError m!"`{decl}` has no field `{name}`, which its `primaryKey` names. Its fields \
+          are: {String.intercalate ", " (names.map (·.1.toString))}."
+      if seen.contains name then
+        throwError m!"`{decl}` names the field `{name}` twice in its `primaryKey`."
+      seen := name :: seen
+  -- The key as indices of the generated index type: the declared fields in the order given, or the
+  -- generated one, or nothing.
+  let keyIndices : List Name :=
+    if declaredKey.isEmpty then keyFields.map (·.1)
+    else declaredKey.filterMap fun name => (names.find? (·.1.toString == name)).map (·.1)
   -- Construct `Table` and add to environment
   let table : Expr ← liftTermElabM <| do
     let idx : Expr := .const indexName []
-    let primaryKey ← List.asExpr idx (keyFields.map fun (n, _) => .const (indexName ++ n) [])
+    let primaryKey ← List.asExpr idx (keyIndices.map fun n => .const (indexName ++ n) [])
     let unique ← Meta.mkAppOptM ``List.nil #[some (← Meta.mkAppM ``List #[idx])]
     let foreignKeys ← Meta.mkAppOptM ``List.nil #[some (← Meta.mkAppM ``ForeignKey #[idx])]
     -- A model declares no indexes: they are attached to the table afterwards, since which of a
