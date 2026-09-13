@@ -143,9 +143,14 @@ come to the same thing.
 
 A model that declares no primary key has nothing for the insert to conflict on, and no sense in
 which one of its rows is the row being replaced. That aborts, naming the table, rather than
-quietly storing a duplicate. Declare a key with `@[model (primaryKey := ["id"]) …]`. An `AutoKey`
-is a key the *database* assigns, which an insert leaves out and nothing conflicts on, so a model
-keyed that way is written with `insert` or `insertReturning` rather than with this. -/
+quietly storing a duplicate. Declare a key with `@[model (primaryKey := ["id"]) …]`.
+
+A key the *database* assigns aborts for the same reason one step further in. An `AutoKey` column is
+left out of the statement so that the database can assign it, so the insert carries no value for
+the key and no row ever conflicts on it: the upsert is a plain insert, and every `save` appends
+another row. There is a key here, so the statement is one both backends run happily — which is why
+this is checked rather than left to the database to object to. Such a model is written with
+`insert` or `insertReturning`. -/
 def save (x : α) : m Unit := do
   let table := (HasModel.model α).table
   let key := table.primaryKey
@@ -153,6 +158,13 @@ def save (x : α) : m Unit := do
     DBMonadWithMigrations.abort <|
       s!"`{(HasModel.model α).index}` declares no primary key, so `save` has nothing to replace " ++
         "a row on. Declare one with `@[model (primaryKey := [\"...\"]) ...]`, or use `insert`."
+  else if let some generated := key.find? fun i => (table.columns i).autoIncrement then
+    DBMonadWithMigrations.abort <|
+      s!"the primary key of `{(HasModel.model α).index}` is `{generated}`, whose value the " ++
+        "database generates. An insert leaves such a column out, so nothing conflicts on it and " ++
+        "a generated key cannot be the target of a `save`: every call would store another row. " ++
+        "Use `insert` or `insertReturning`, or key the model on the columns the row supplies, " ++
+        "with `@[model (primaryKey := [\"...\"]) ...]`."
   else
     let set := (Enum.all table.Index).toList.filter fun i => !key.contains i
     if set.isEmpty then

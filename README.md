@@ -907,9 +907,11 @@ It is `upsert x` on the table's primary key, setting every column that is not pa
 it needs a key to conflict on: a model that declares none aborts, naming the table, rather than
 storing a second row that looks like the first. A model every column of which is part of its key
 has nothing to set, and there `save` is an `insertIfAbsent` — the row already there *is* the row
-being written. A key the *database* assigns is not one to save on either: an `AutoKey` is left out
-of the statement, so nothing conflicts on it and `insert`/`insertReturning` is what writes such a
-row.
+being written. A key the *database* assigns aborts as well, naming the column: an `AutoKey` is left
+out of the statement, so the insert carries no value for the key, nothing conflicts on it, and the
+upsert is a plain insert that appends a row on every call. That one is not a statement either
+backend objects to — the key is there — so it is refused here, and `insert`/`insertReturning`, or a
+key over the columns the row does supply, is what writes such a record.
 
 `DBMonadTransactional.withTransaction` groups several operations into one atomic unit, committing
 if the block succeeds and rolling back if it fails. A nested call is a savepoint, so its failure

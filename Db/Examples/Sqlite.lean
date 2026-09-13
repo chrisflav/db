@@ -1023,6 +1023,20 @@ def saveWithoutKeyDemo : Sqlite.M Unit := do
   catch e =>
     IO.println s!"refused, as expected: {e}"
 
+/-- `save` on a model whose key the database generates is refused too, and for a subtler reason:
+there *is* a key, so the upsert is built and runs, but the insert leaves the generated column out,
+nothing conflicts on it, and every call appends a row. `Tag` is such a model — a single `AutoKey`
+field. The table has to be empty afterwards, or the refusal came too late to be one. -/
+def saveWithGeneratedKeyDemo : Sqlite.M Unit := do
+  autoUpdate (%database mydb)
+  for _ in [0:2] do
+    try
+      HasModel.save ({ id := 0, label := v"urgent" } : Tag)
+      IO.println "a save on a generated key was accepted, which it should not be."
+    catch e =>
+      IO.println s!"refused, as expected: {e}"
+  IO.println s!"rows in `tag` after two saves: {← HasModel.count (QuerySet.all (α := Tag))}"
+
 /-- A default on a float column reaches a fixed point too. -/
 def floatDefaultDemo : Sqlite.M Unit := do
   autoUpdate gaugeDb
@@ -1170,6 +1184,7 @@ def test : IO Unit := do
   Sqlite.runDB ":memory:" floatDefaultDemo
   Sqlite.runDB ":memory:" (KeyExample.keyDemo "SQLite")
   Sqlite.runDB ":memory:" saveWithoutKeyDemo
+  Sqlite.runDB ":memory:" saveWithGeneratedKeyDemo
   Sqlite.runDB ":memory:" migrationsDemo
   Sqlite.runDB ":memory:" identifierDemo
 
