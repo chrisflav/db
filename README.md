@@ -887,6 +887,21 @@ reports it rather than emitting SQL the database would reject. Supply at least o
 need to upsert.
 
 A skipped row is a row the statement did not store, so `insertReturning` on an `.ignore` insert
+returns no rows rather than the row that was already there.
+
+`HasModel.save` is the upsert a record store writes with: store this row, replacing whatever is
+under its primary key.
+
+```lean4
+HasModel.save ({ handle := "ada", displayName := "Ada Lovelace" } : Profile)
+```
+
+It is `upsert x` on the table's primary key, setting every column that is not part of that key, so
+it needs a key to conflict on: a model that declares none aborts, naming the table, rather than
+storing a second row that looks like the first. A model every column of which is part of its key
+has nothing to set, and there `save` is an `insertIfAbsent` — the row already there *is* the row
+being written. A key the *database* assigns is not one to save on either: an `AutoKey` is left out
+of the statement, so nothing conflicts on it and `insert`/`insertReturning` is what writes such a
 row.
 
 `DBMonadTransactional.withTransaction` groups several operations into one atomic unit, committing

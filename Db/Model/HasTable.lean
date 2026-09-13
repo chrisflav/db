@@ -133,6 +133,35 @@ def upsert (x : α) (target set : List ((HasModel.model α).table.Index)) : m (A
     { insertData x with onConflict := .update target set }
   return rows.map HasView.encoding.invFun
 
+/-- Store `x`, replacing whatever row is under its primary key: an insert that, on a conflict on
+the key, sets every column not part of the key to the value `x` carries. This is the "write this
+record" of a store keyed by an id its caller chooses.
+
+A model whose every column is part of its key has nothing to set, and `save` is then an
+`insertIfAbsent`: the row already there *is* the row being written, so leaving it and replacing it
+come to the same thing.
+
+A model that declares no primary key has nothing for the insert to conflict on, and no sense in
+which one of its rows is the row being replaced. That aborts, naming the table, rather than
+quietly storing a duplicate. Declare a key with `@[model (primaryKey := ["id"]) …]`. An `AutoKey`
+is a key the *database* assigns, which an insert leaves out and nothing conflicts on, so a model
+keyed that way is written with `insert` or `insertReturning` rather than with this. -/
+def save (x : α) : m Unit := do
+  let table := (HasModel.model α).table
+  let key := table.primaryKey
+  if key.isEmpty then
+    DBMonadWithMigrations.abort <|
+      s!"`{(HasModel.model α).index}` declares no primary key, so `save` has nothing to replace " ++
+        "a row on. Declare one with `@[model (primaryKey := [\"...\"]) ...]`, or use `insert`."
+  else
+    let set := (Enum.all table.Index).toList.filter fun i => !key.contains i
+    if set.isEmpty then
+      let _ ← insertIfAbsent x
+      pure ()
+    else
+      let _ ← upsert x key set
+      pure ()
+
 /-- Insert `x` and return the row the database stored, which is how the value of a column the
 database generates, such as an `AutoKey`, is obtained without a second query. -/
 def insertReturning (x : α) : m α := do

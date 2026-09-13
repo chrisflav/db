@@ -9,6 +9,7 @@ import Db.Examples.Migrations
 import Db.Examples.Joins
 import Db.Examples.Recursive
 import Db.Examples.Floats
+import Db.Examples.Keys
 
 /-!
 # PostgreSQL backend example
@@ -152,6 +153,15 @@ column declared `double precision` is read back as one — PostgreSQL reports a 
 and `autoUpdate` only converges if that is the name it was declared with. -/
 def floatTest : IO Unit := do
   match ← PostgreSQL.runDB (← postgresUrl) (FloatExample.floatDemo "PostgreSQL") with
+  | .error e => IO.println s!"Error occured: {repr e}."
+  | .ok _ => pure ()
+
+/-- A declared primary key against a real server. PostgreSQL is the stricter of the two about
+`ON CONFLICT`: a `DO UPDATE` needs a conflict target, and the target has to name a constraint the
+table really has, so a declared key that never reached `CREATE TABLE` fails here rather than
+quietly inserting a second row. -/
+def keyTest : IO Unit := do
+  match ← PostgreSQL.runDB (← postgresUrl) (KeyExample.keyDemo "PostgreSQL") with
   | .error e => IO.println s!"Error occured: {repr e}."
   | .ok _ => pure ()
 

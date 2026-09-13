@@ -11,6 +11,7 @@ def main : IO Unit := do
   BookExample.joinTest
   BookExample.recursiveTest
   BookExample.floatTest
+  BookExample.keyTest
   BookExample.extendTest
   BookExample.migrationsTest
   BookExample.identifierTest

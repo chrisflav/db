@@ -8,6 +8,7 @@ import Db.Examples.Migrations
 import Db.Examples.Joins
 import Db.Examples.Recursive
 import Db.Examples.Floats
+import Db.Examples.Keys
 
 /-!
 # SQLite backend example
@@ -1011,6 +1012,17 @@ def gaugeDb : DatabaseRecipe where
            ("reading", { type := .float, nullable := false, default? := some (.call "0.0") })]
         primaryKey := ["id"] })]
 
+/-- `save` on a model with no primary key has nothing to conflict on, so it says so rather than
+storing a second row that looks like the first. `Book` is such a model: ordinary columns, no
+declared key and no `AutoKey` field. -/
+def saveWithoutKeyDemo : Sqlite.M Unit := do
+  autoUpdate (%database mydb)
+  try
+    HasModel.save novel
+    IO.println "a keyless save was accepted, which it should not be."
+  catch e =>
+    IO.println s!"refused, as expected: {e}"
+
 /-- A default on a float column reaches a fixed point too. -/
 def floatDefaultDemo : Sqlite.M Unit := do
   autoUpdate gaugeDb
@@ -1156,6 +1168,8 @@ def test : IO Unit := do
   Sqlite.runDB ":memory:" modelConflictDemo
   Sqlite.runDB ":memory:" (FloatExample.floatDemo "SQLite")
   Sqlite.runDB ":memory:" floatDefaultDemo
+  Sqlite.runDB ":memory:" (KeyExample.keyDemo "SQLite")
+  Sqlite.runDB ":memory:" saveWithoutKeyDemo
   Sqlite.runDB ":memory:" migrationsDemo
   Sqlite.runDB ":memory:" identifierDemo
 
