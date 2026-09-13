@@ -55,6 +55,10 @@ inductive Expr where
   | column (table column : String)
   | str (s : String)
   | int (n : Int)
+  /-- A floating-point literal, rendered at seventeen significant digits of the exact binary value
+  so that the database stores what was written. NaN and the infinities have no literal in either
+  dialect; see `Expr.toString`. -/
+  | float (x : Float)
   | add (e₁ e₂ : Expr)
   | sub (e₁ e₂ : Expr)
   | mul (e₁ e₂ : Expr)
@@ -205,6 +209,15 @@ partial def Expr.toString : Expr → String
   | .var name => quoteIdent name
   | .str s => quoteString s
   | .int n => ToString.toString n
+  -- A NaN or an infinity is not a number either dialect can be told about — SQLite has no literal
+  -- for one at all, and PostgreSQL's `'NaN'::double precision` is a cast of a string. Neither is
+  -- something to emit silently in place of a value, so this is a panic rather than a fallback: it
+  -- names the problem on stderr and leaves behind SQL the database refuses, instead of a statement
+  -- that stores something the caller did not mean.
+  | .float x =>
+    match x.toDecimalString? with
+    | some s => s
+    | none => panic! s!"a NaN or infinite Float has no SQL literal (was: {x})"
   | .add e₁ e₂ => s!"({e₁.toString}) + ({e₂.toString})"
   | .sub e₁ e₂ => s!"({e₁.toString}) - ({e₂.toString})"
   | .mul e₁ e₂ => s!"({e₁.toString}) * ({e₂.toString})"
@@ -293,6 +306,7 @@ def Expr.ofDBTypeValue {t : DBType} (x : t.Value) : Expr :=
   | .int => .int x
   | .varchar _ => .str x
   | .text => .str x
+  | .float => .float x
   | .bool => if x then .true else .false
 
 def Expr.ofValue {c : Column} (x : c.Value) : Expr :=
@@ -468,6 +482,7 @@ partial def Expr.fromExpr {d : Database} {view : View d} {t : DBType}
   | .str s => pure (.str s.1)
   | .text s => pure (.str s)
   | .int n => pure (.int n)
+  | .float x => pure (.float x)
   | .null _ => pure .null
   | .var idx _ _ => pure (env idx)
 
@@ -804,11 +819,20 @@ def Delete.fromDelete {d : Database} {tableName : d.Index} (del : d.Delete table
   fromTable := ToString.toString tableName
   condition := (Expr.fromExpr (tableEnv tableName) del.condition).run' 0
 
+/-- The SQL type name a column of this `DBType` is declared with.
+
+One spelling serves both dialects, which is what keeps this independent of the `Dialect`. For
+`float` that spelling is `double precision`: it is PostgreSQL's own name for the type — and the
+name it reports back for it, so introspection there sees what was declared — while SQLite takes any
+type name and derives an affinity from it, giving a declared type containing `DOUB` the same `REAL`
+affinity that the word `REAL` would. SQLite reports the declared text back verbatim, so `double
+precision` round-trips there too, which is what `autoUpdate` needs to reach a fixed point. -/
 def DBType.toString : DBType → String
   | .int => "integer"
   | .varchar n => s!"varchar({n})"
   | .text => "text"
   | .bool => "bool"
+  | .float => "double precision"
 
 /-- A column default, as it is written in a `CREATE TABLE`. A call is parenthesised, which SQLite
 requires and PostgreSQL accepts. -/
@@ -870,6 +894,11 @@ def ColumnDefault.parse? (t : DBType) (raw : String) : Option ColumnDefault :=
       match unquoted? with
       | some literal => some (.str literal)
       | none => asCall
+    -- `ColumnDefault` has no floating-point literal: it derives `DecidableEq` and `Hashable`, and
+    -- `Float` has neither. A default on a float column is therefore always an expression, which is
+    -- what makes it round-trip — declare it as `.call "0.0"` and the two compare equal however the
+    -- database rewrites the text.
+    | .float => asCall
 
 /-- Strip the explicit type cast PostgreSQL appends to the column default it reports, e.g. the
 `::character varying` of `'open'::character varying`.

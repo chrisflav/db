@@ -171,6 +171,7 @@ is translated into an SQL condition. The following are recognised:
 | `b.year.isNone`, `b.year.isSome` | `IS NULL`, `IS NOT NULL` |
 | `b.year = some 1998` | `= 1998` |
 | `b.note = "classic"` | `= 'classic'` (a `String` constant is a `text` literal, `DBExpr.text`) |
+| `s.value > 1.0` | `> 1.0` (a `Float` constant is a `float` literal, `DBExpr.float`) |
 | `like b.title "A drama%"` | `LIKE 'A drama%'`, with `\\` escaping the next character |
 | `contains b.title "100%"` | `LIKE '%100\\%%'`, with the wildcards in the needle escaped |
 | `isIn a.name [v"Mike", v"Nora"]` | `IN ('Mike', 'Nora')` |
@@ -265,9 +266,9 @@ IO.println s!"{← HasModel.count (QuerySet.all (α := Book))} books"
 
 More general aggregation is `Query.aggregate`, which takes an `Aggregation source out`: every
 column of the output view `out` is either a column of `source` that is grouped over, or an
-aggregate (`COUNT(*)`, `COUNT`, `COUNT DISTINCT`, `SUM`, `MIN`, `MAX`) of the rows of a group. A
-function is only applicable to the types it is defined on, so `SUM` over a `varchar` column does
-not elaborate. Supplying the output view is what keeps this general — it names and types the
+aggregate (`COUNT(*)`, `COUNT`, `COUNT DISTINCT`, `SUM`, `AVG`, `MIN`, `MAX`) of the rows of a
+group. A function is only applicable to the types it is defined on, so `SUM` over a `varchar`
+column does not elaborate. Supplying the output view is what keeps this general — it names and types the
 result columns, nullability included: grouping over a nullable column, or taking the `MIN` of one,
 produces a column that can be `NULL`:
 
@@ -280,7 +281,10 @@ def booksPerAuthor : Query mydb booksPerAuthorView :=
     (.all (HasModel.model Book).index)
 ```
 
-`AVG` is missing because `DBType` has no floating-point type to give its result.
+`SUM` and `AVG` are the two that need a number. `SUM` gives a value of the column's own type;
+`AVG` gives a `float` whatever it is taken of, an average being a value an integer column has no
+room for and not a value either backend hands back as one. Both are `NULL` for a group whose
+values are all `NULL`, as `MIN` and `MAX` are, and the output view has to say so.
 
 `Query.extend` adds a column computed from the row it belongs to, which is what a `SELECT` list
 does beyond naming columns — `project` renames and drops them and `aggregate` computes over a
@@ -293,7 +297,9 @@ let inTenYears : Query mydb _ :=
     (.all (HasModel.model Author).index)
 ```
 
-`DBExpr` has `add`, `sub` and `mul`, on integers only, `DBType` having no other numeric type.
+`DBExpr` has `add`, `sub` and `mul`, on integers only. Arithmetic on `float` columns is not there
+yet; what a float column can do in an expression is be compared with another one and with a
+literal.
 
 `Query.correlate` computes one such aggregate per row of an outer query, over the rows of a
 subquery correlated with that row — the `(SELECT COUNT(*) FROM child WHERE child.parent =
@@ -431,10 +437,51 @@ you, the name being what a reader of the generated SQL sees.
 
 ## Column types and defaults
 
-`DBType` covers `bool`, `int`, `varchar n` and unbounded `text`. A model field of type `String`
-becomes a `text` column, `Option α` a nullable one. A comparison has both operands at one `DBType`,
-so a `text` column is compared with — and updated to — `DBExpr.text`, and a `varchar n` one
-`DBExpr.str`.
+`DBType` covers `bool`, `int`, `varchar n`, unbounded `text` and `float`. A model field of type
+`String` becomes a `text` column, one of type `Float` a `float` column, and `Option α` a nullable
+one. A comparison has both operands at one `DBType`, so a `text` column is compared with — and
+updated to — `DBExpr.text`, a `varchar n` one `DBExpr.str`, and a `float` one `DBExpr.float`.
+
+### Floating point
+
+`float` is a `Float`: an IEEE 754 double, the only floating-point type Lean has. It is declared as
+`double precision`, which is PostgreSQL's own name for it and the name PostgreSQL reports back,
+while SQLite — which takes any type name and derives an affinity from it — gives anything
+containing `DOUB` the same `REAL` affinity the word `REAL` has, and reports the declared text
+verbatim. So one spelling serves both dialects and `autoUpdate` reaches a fixed point on either.
+
+What a floating-point column costs is precision on the way in and on the way out, and both ends
+here are written so that a value read back is the value that was written, bit for bit.
+
+Writing is the literal. `Float.toString` prints six digits after the point — `toString (1e-7 :
+Float)` is `"0.000000"`, and every subnormal is zero — and `Lean.toJson` goes through the same
+printer, so neither can be what a literal is built from. `Float.toDecimalString` prints seventeen
+significant digits of the *exact* binary value instead, which is the shortest precision at which
+every double round-trips: `Float.frExp` gives the mantissa and exponent, `m · 2^53` is an integer,
+and the decimal digits are a long division carried out in exact `Nat` arithmetic. There is always
+a digit on either side of the point (`4.0`, never `4`), so that nothing a float column is set to
+reads as an integer.
+
+NaN and the infinities have no literal in either dialect — SQLite has none at all, and
+PostgreSQL's `'NaN'::double precision` is a cast of a string rather than a number. Rendering one is
+therefore a panic, not a fallback: it names the value on stderr and leaves behind SQL the database
+refuses, rather than quietly storing something else.
+
+Reading is the backends' own printing, and neither prints enough by default. SQLite converts a
+`REAL` to text at fifteen significant digits, so `0.30000000000000004` would come back as `0.3` and
+the largest double as an infinity; the SQLite backend therefore reads a value SQLite holds as a
+float through `sqlite3_column_double` and prints it with the printer above. Which values those are
+is decided by the value's own runtime type rather than by the declared column type, SQLite storing
+what it was given whatever the column says. PostgreSQL prints what `extra_float_digits` asks for,
+which since version 12 defaults to the shortest text that round-trips but on older servers is
+fifteen digits, so the connection sets it to the maximum on open. `Float.ofDecimalString?` reads
+back what either prints — `0.1`, `-3`, `1e-07`, `1.0e+20`, `1E5`, `.5` — and the spellings
+`Infinity` and `NaN` besides, so that a row holding one is reported rather than refused.
+
+`ColumnDefault` has no floating-point literal: it derives `DecidableEq` and `Hashable`, and `Float`
+has neither. A default on a float column is written as an expression instead, `.call "0.0"`, which
+is also what makes it converge — two expression defaults compare equal however the database
+rewrites the text of one, where a literal would have to survive the rewriting.
 
 A column may declare a `default?`, which the database fills in when an insert omits it:
 

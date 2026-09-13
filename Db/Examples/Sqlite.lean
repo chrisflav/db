@@ -7,6 +7,7 @@ import Db.Examples.Schema
 import Db.Examples.Migrations
 import Db.Examples.Joins
 import Db.Examples.Recursive
+import Db.Examples.Floats
 
 /-!
 # SQLite backend example
@@ -995,6 +996,31 @@ def modelConflictDemo : Sqlite.M Unit := do
 
 end ModelConflicts
 
+/-- A hand-written table with a default on its float column. `ColumnDefault` has no floating-point
+literal — it derives `DecidableEq` and `Hashable`, and `Float` has neither — so such a default is
+an expression, which is also what makes it converge: two expression defaults compare equal however
+the database rewrites the text of one.
+
+A database of its own, which only the SQLite suite can afford: `autoUpdate` drops the tables its
+target does not declare, and every demo here runs against a fresh in-memory database. -/
+def gaugeDb : DatabaseRecipe where
+  tables := .ofList
+    [("gauge",
+      { columns := .ofList
+          [("id", { type := .int, nullable := false }),
+           ("reading", { type := .float, nullable := false, default? := some (.call "0.0") })]
+        primaryKey := ["id"] })]
+
+/-- A default on a float column reaches a fixed point too. -/
+def floatDefaultDemo : Sqlite.M Unit := do
+  autoUpdate gaugeDb
+  autoUpdate gaugeDb
+  let current ← currentDatabase
+  IO.println <|
+    s!"pending operations on `gauge` after two autoUpdates: {(current.operations gaugeDb).size}"
+  IO.println <| s!"the type and default read back for `gauge`.`reading`: " ++
+    s!"{repr ((current.tables["gauge"]?.bind (·.columns["reading"]?)).map fun c => (c.type, c.default?))}"
+
 /-- Change `mig_book.year` from an integer to text. SQLite realises a column type change by
 rebuilding the table, which is why this exists in two versions: the atomic one cannot work there,
 and saying so is the point. -/
@@ -1128,6 +1154,8 @@ def test : IO Unit := do
   Sqlite.runDB ":memory:" extendDemo
   Sqlite.runDB ":memory:" correlateDemo
   Sqlite.runDB ":memory:" modelConflictDemo
+  Sqlite.runDB ":memory:" (FloatExample.floatDemo "SQLite")
+  Sqlite.runDB ":memory:" floatDefaultDemo
   Sqlite.runDB ":memory:" migrationsDemo
   Sqlite.runDB ":memory:" identifierDemo
 

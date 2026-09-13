@@ -152,6 +152,10 @@ instance : HasDBType String where
   type := .text
   encoding := Equiv.refl _
 
+instance : HasDBType Float where
+  type := .float
+  encoding := Equiv.refl _
+
 instance : HasColumn AutoKey where
   column := { type := .int, nullable := false, autoIncrement := true }
   encoding := Equiv.refl _

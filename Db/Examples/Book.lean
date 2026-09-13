@@ -8,6 +8,7 @@ import Db.Examples.Schema
 import Db.Examples.Migrations
 import Db.Examples.Joins
 import Db.Examples.Recursive
+import Db.Examples.Floats
 
 /-!
 # PostgreSQL backend example
@@ -141,6 +142,16 @@ literal against the step's `depth + 1` and the title comes from the table on bot
 from a string literal, whose type would be `text` against the column's `varchar(100)`. -/
 def recursiveTest : IO Unit := do
   match ← PostgreSQL.runDB (← postgresUrl) (RecursiveExample.recursiveDemo "PostgreSQL") with
+  | .error e => IO.println s!"Error occured: {repr e}."
+  | .ok _ => pure ()
+
+/-- The floating-point round trip against a real server. What this adds over the SQLite run is the
+server's own printing: a value comes back as the text PostgreSQL renders for it, which says all of
+the digits only because the connection asks for `extra_float_digits = 3`. It also checks that a
+column declared `double precision` is read back as one — PostgreSQL reports a type by its own name,
+and `autoUpdate` only converges if that is the name it was declared with. -/
+def floatTest : IO Unit := do
+  match ← PostgreSQL.runDB (← postgresUrl) (FloatExample.floatDemo "PostgreSQL") with
   | .error e => IO.println s!"Error occured: {repr e}."
   | .ok _ => pure ()
 

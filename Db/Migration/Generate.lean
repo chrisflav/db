@@ -54,6 +54,7 @@ def dbType : DBType → String
   | .int => ".int"
   | .varchar n => s!".varchar {n}"
   | .text => ".text"
+  | .float => ".float"
 
 def columnDefault : ColumnDefault → String
   | .int n => s!".int {int n}"

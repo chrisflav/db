@@ -59,6 +59,18 @@ structure Node where
   title : VarChar 100
   deriving Repr
 
+/-- A measurement: a `Float` field, which becomes a `float` column, and an `Option Float`, which
+becomes a nullable one.
+
+Part of the shared schema for the same reason `node` is: `autoUpdate` drops the tables its target
+does not declare, and the PostgreSQL demos share one database. -/
+@[model (dbName := "sample") mydb]
+structure Sample where
+  id : AutoKey
+  value : Float
+  margin : Option Float
+  deriving Repr
+
 section Identifiers
 
 /-- A table that is nothing but awkward names: a mixed-case table name, a mixed-case column, and

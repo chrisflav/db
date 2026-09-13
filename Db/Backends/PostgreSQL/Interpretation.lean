@@ -43,7 +43,15 @@ nonrec def M.run (s : State) {α : Type} (x : M α) : IO (Except Exception α) :
 def runDB (connectionInfo : String) {α : Type} (x : M α) : IO (Except Exception α) := do
   let conn ← connect connectionInfo
   match conn with
-  | some conn => x.run { connectionInfo := connectionInfo, connection := conn }
+  | some conn =>
+    -- Values come back as the text the server prints for them, so a `double precision` column is
+    -- only read back exactly if the server prints all of its digits. `extra_float_digits` is 1 by
+    -- default on PostgreSQL 12 and later, which already means "the shortest text that round-trips";
+    -- older servers default to 0, which is fifteen significant digits and loses the last bits of a
+    -- double. Asking for the maximum says the same thing to both. The result is ignored: a server
+    -- that will not take the setting is no reason to refuse the connection.
+    let _ ← conn.exec "SET extra_float_digits = 3"
+    x.run { connectionInfo := connectionInfo, connection := conn }
   | none => return .error .connectionError
 
 /-- Decode the rows of a result into the entries of `view`.
@@ -173,6 +181,9 @@ def InformationSchema.column (info : InformationSchema) : Option Column := do
     | "integer" => pure DBType.int
     | "boolean" => pure DBType.bool
     | "text" => pure DBType.text
+    -- The name `DBType.toString` declares a float column with, and the one PostgreSQL reports for
+    -- it, so the two sides of the diff agree.
+    | "double precision" => pure DBType.float
     | "character varying" =>
       match info.character_maximum_length with
       | some n => pure <| DBType.varchar n.toNat

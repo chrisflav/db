@@ -256,6 +256,9 @@ private partial def transVal (ctx : Context) (e : Expr) : TermElabM (Expr × Exp
     if ty.isConstOf ``Int then
       return (← mkAppOptM ``DBExpr.int #[some ctx.db, some ctx.view, some e],
         Lean.mkConst ``DBType.int)
+    if ty.isConstOf ``Float then
+      return (← mkAppOptM ``DBExpr.float #[some ctx.db, some ctx.view, some e],
+        Lean.mkConst ``DBType.float)
   throwError m!"unsupported expression in query condition: `{e}`"
 
 /-- Translate a term that is expected to denote a boolean condition. -/
