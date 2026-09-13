@@ -187,6 +187,13 @@ written around a literal it is compared with; testing for `NULL` is `isNone`, no
 Membership in a subquery, `col IN (SELECT ...)`, is `DBExpr.inSubquery` on the core API; the
 `query%` DSL has no surface syntax for it yet.
 
+None of the words the DSL spells its clauses with is a reserved keyword: `guard`, `select`,
+`order_by`, `order_by_desc`, `limit`, `offset` and the `v"..."` prefix are recognised only inside a
+`query% do` block, and stay ordinary identifiers everywhere else. Importing `Db` therefore leaves
+core's `guard` usable in a `do` block over `Option`/`Except`, and leaves `limit`, `offset`, `select`
+and `v` free for fields, locals and parameters — `Db/Examples/Identifiers.lean` uses both meanings
+in one module. (`from` is a Lean keyword, with or without this library.)
+
 ## Joins
 
 `Query.join` is a cross join, and an inner join is that filtered by a condition, which is what the
