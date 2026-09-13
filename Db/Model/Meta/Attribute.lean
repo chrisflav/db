@@ -31,7 +31,8 @@ structure ModelConfig where
 
   Empty for a model that declares none, whose key is then its `AutoKey` field if it has one and
   nothing at all otherwise. A declared key and an `AutoKey` field together are refused: a generated
-  key has to be the whole primary key. -/
+  key has to be the whole primary key. So is a key over an `Option` field, which would be a
+  nullable key column; `generateTable` says why. -/
   primaryKey : List String := []
   deriving Inhabited
 

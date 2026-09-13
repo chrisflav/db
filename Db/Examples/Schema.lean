@@ -96,6 +96,24 @@ structure Membership where
   member : String
   deriving Repr
 
+section KeyChecks
+
+-- A field the key names has to be a column that can hold the key: an `Option` is a nullable
+-- column, which PostgreSQL makes `NOT NULL` behind the declaration — leaving `autoUpdate` to
+-- propose a `DROP NOT NULL` PostgreSQL then refuses, on every run — and which SQLite fills with
+-- `NULL`s that do not conflict with each other, so two `save`s of `none` store two rows. Rejected
+-- where the key is written, rather than in a schema neither backend keeps.
+/--
+error: the field `handle` of `BookExample.NullableKey` is an `Option`, so it is a nullable column, and its `primaryKey` names it. A primary key cannot be nullable: PostgreSQL makes such a column `NOT NULL` behind the declaration and then refuses the `DROP NOT NULL` `autoUpdate` proposes on every later run, and SQLite lets two rows carry `NULL` there, which is two rows under one key. Drop the `Option`, or key the model on another field.
+-/
+#guard_msgs in
+@[model (dbName := "nullableKey") (primaryKey := ["handle"]) mydb]
+structure NullableKey where
+  handle : Option String
+  body : String
+
+end KeyChecks
+
 section Identifiers
 
 /-- A table that is nothing but awkward names: a mixed-case table name, a mixed-case column, and

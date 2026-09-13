@@ -222,7 +222,9 @@ Generate a `Table` for structure named `decl`.
 
 `declaredKey` is the primary key the `@[model]` attribute named, as field names in the order they
 are to be the key in; empty for a model that names none, whose key is then its `AutoKey` field, if
-it has one, and nothing otherwise.
+it has one, and nothing otherwise. A name that is not a field, a name given twice, a key beside an
+`AutoKey` field, and a key over an `Option` field are all refused here, where the attribute is
+written, rather than in the schema they would produce.
 -/
 def generateTable (decl : Name) (declaredKey : List String := []) : CommandElabM Unit := do
   let names ← getStructureArgs decl
@@ -253,11 +255,23 @@ def generateTable (decl : Name) (declaredKey : List String := []) : CommandElabM
         be combined: drop one of them."
     let mut seen : List String := []
     for name in declaredKey do
-      unless names.any (·.1.toString == name) do
-        throwError m!"`{decl}` has no field `{name}`, which its `primaryKey` names. Its fields \
-          are: {String.intercalate ", " (names.map (·.1.toString))}."
+      let some field := names.find? (·.1.toString == name)
+        | throwError m!"`{decl}` has no field `{name}`, which its `primaryKey` names. Its fields \
+            are: {String.intercalate ", " (names.map (·.1.toString))}."
       if seen.contains name then
         throwError m!"`{decl}` names the field `{name}` twice in its `primaryKey`."
+      -- An `Option` field is a nullable column, and a nullable primary key is not a key either
+      -- backend keeps: PostgreSQL makes such a column `NOT NULL` behind the declaration, which
+      -- introspection then reports back and `autoUpdate` proposes to undo on every run — with a
+      -- `DROP NOT NULL` PostgreSQL refuses, so the schema never converges. SQLite is the other
+      -- failure: it lets a `NULL` into a key column, so two rows whose key is `none` are two rows
+      -- and `save` stores both.
+      if field.2.isAppOf ``Option then
+        throwError m!"the field `{name}` of `{decl}` is an `Option`, so it is a nullable column, \
+          and its `primaryKey` names it. A primary key cannot be nullable: PostgreSQL makes such \
+          a column `NOT NULL` behind the declaration and then refuses the `DROP NOT NULL` \
+          `autoUpdate` proposes on every later run, and SQLite lets two rows carry `NULL` there, \
+          which is two rows under one key. Drop the `Option`, or key the model on another field."
       seen := name :: seen
   -- The key as indices of the generated index type: the declared fields in the order given, or the
   -- generated one, or nothing.

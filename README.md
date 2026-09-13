@@ -564,6 +564,12 @@ this a model had no key at all unless it had an `AutoKey` field, and `insertIfAb
 then had nothing to conflict on — a record keyed by an id its writer chooses, which is most of
 what a record store holds, could not say so.
 
+So is a name whose field is an `Option`, because a nullable primary key is not one either backend
+keeps. PostgreSQL makes such a column `NOT NULL` behind the declaration, reports it back as such,
+and then refuses the `DROP NOT NULL` `autoUpdate` proposes on every later run, so the schema never
+converges; SQLite lets a `NULL` into a key column, where two rows whose key is `none` are two rows
+that conflict with nothing and `save` stores both.
+
 A column may be `autoIncrement`, meaning the database assigns its value; `Database.Insert.ofEntry`
 leaves such a column out, so the model layer never sends one. In a model structure a field of type
 `AutoKey` becomes exactly that — an auto-incrementing single-column primary key:
