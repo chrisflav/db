@@ -650,6 +650,9 @@ inductive DBExpr (d : Database) : View d → DBType → Type 1 where
   | mul {view : View d} (e₁ e₂ : DBExpr d view .int) : DBExpr d view .int
   /-- A string literal. -/
   | str {view : View d} {n : Nat} (s : VarChar n) : DBExpr d view (.varchar n)
+  /-- A string literal at type `text`. `str` is the bounded one, at `varchar n`; a comparison
+  has both operands at one type, so a `text` column needs a literal at its own. -/
+  | text {view : View d} (s : String) : DBExpr d view .text
   /-- An integer literal. -/
   | int {view : View d} (n : Int) : DBExpr d view .int
   /-- The literal `NULL`, at a given type. -/
