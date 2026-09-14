@@ -39,6 +39,18 @@ opaque connect (connInfo : String) : IO Connection
 @[extern "c_PQstatus"]
 opaque Connection.connStatus (conn : Connection) : UInt8
 
+/-- Close the connection now.
+
+    The handle's finalizer closes it too, so this is not what keeps a program from leaking; it is
+    what keeps one from running out. A caller that opens a connection per operation holds a server
+    backend for every handle the collector has not got to yet, and `max_connections` is reached
+    long before the memory those handles occupy is worth collecting.
+
+    Idempotent, and safe to call on a handle that is dropped afterwards: the shim clears the
+    pointer, and the finalizer does nothing with a cleared one. -/
+@[extern "c_PQfinish"]
+opaque Connection.finish (conn : Connection) : IO Unit
+
 @[extern "c_PQexec"]
 opaque Connection.exec (m : Connection) (query : String) : IO Result
 

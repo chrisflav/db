@@ -22,14 +22,22 @@ def splitArgs (s : String) : Array String :=
     on its search path makes it resolve glibc there too, which fails to link against the toolchain's
     `Scrt1.o`. Passing the one library by path takes libpq without the directory around it.
 
-    Falls back to `-lpq` when `pg_config` is absent, which is right where libpq sits somewhere the
+    `pkg-config` is asked first and `pg_config` second, because the two are packaged apart on some
+    distributions: nixpkgs' libpq ships the `.pc` file and no `pg_config` at all — that belongs to
+    the server package, which a machine building a client has no reason to install — so asking
+    only `pg_config` finds nothing there, falls through to `-lpq`, and then fails to link for the
+    reason above. `libpqIncludeArgs` below already prefers `pkg-config`; this is the same order.
+
+    Falls back to `-lpq` when neither tool knows, which is right where libpq sits somewhere the
     linker already searches. -/
 def libpqLinkArgs : IO (Array String) := do
-  let some dir ← toolOutput? "pg_config" #["--libdir"] | return #["-lpq"]
-  for ext in ["so", "dylib", "a"] do
-    let candidate : FilePath := FilePath.mk dir / s!"libpq.{ext}"
-    if ← candidate.pathExists then
-      return #[candidate.toString]
+  let dirs := (← toolOutput? "pkg-config" #["--variable=libdir", "libpq"]).toArray
+    ++ (← toolOutput? "pg_config" #["--libdir"]).toArray
+  for dir in dirs do
+    for ext in ["so", "dylib", "a"] do
+      let candidate : FilePath := FilePath.mk dir / s!"libpq.{ext}"
+      if ← candidate.pathExists then
+        return #[candidate.toString]
   return #["-lpq"]
 
 /-- The include directory holding `libpq-fe.h`. -/

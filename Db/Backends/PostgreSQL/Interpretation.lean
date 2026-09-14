@@ -53,10 +53,24 @@ nonrec def M.run (s : State) {α : Type} (x : M α) : IO (Except Exception α) :
   let _ ← s.connection.exec "SET extra_float_digits = 3"
   return (← x.run.run s).1
 
+/-- Open a connection, run `x` against it, and close it again.
+
+    The close is the point of the `try`/`finally`: `x` is an arbitrary computation and may throw,
+    and until this closed its connection on the way out, a caller that opened one per operation
+    accumulated server backends at the rate it did work. Lean's collector reclaims the handles
+    eventually, which bounds memory and not `max_connections`, so the symptom was not a leak that
+    grew slowly — it was `FATAL: sorry, too many clients already` under ordinary load.
+
+    `Connection.close` is idempotent and the handle is not used after this returns, so closing
+    here does not race the finalizer that will also run on it. -/
 def runDB (connectionInfo : String) {α : Type} (x : M α) : IO (Except Exception α) := do
   let conn ← connect connectionInfo
   match conn with
-  | some conn => x.run { connectionInfo := connectionInfo, connection := conn }
+  | some conn =>
+    try
+      x.run { connectionInfo := connectionInfo, connection := conn }
+    finally
+      conn.close
   | none => return .error .connectionError
 
 /-- Decode the rows of a result into the entries of `view`.
@@ -203,6 +217,10 @@ structure InformationSchema where
 def InformationSchema.column (info : InformationSchema) : Option Column := do
   let dbtype : DBType ← do
     match info.data_type.val with
+    -- `bigint` is what `DBType.toString` declares an int column with; `integer` is what it used
+    -- to, and is still read so that a database created under the old spelling diffs as equal in
+    -- everything but the declaration and is not rewritten on sight.
+    | "bigint" => pure DBType.int
     | "integer" => pure DBType.int
     | "boolean" => pure DBType.bool
     | "text" => pure DBType.text

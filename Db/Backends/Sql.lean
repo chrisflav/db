@@ -909,9 +909,21 @@ One spelling serves both dialects, which is what keeps this independent of the `
 name it reports back for it, so introspection there sees what was declared — while SQLite takes any
 type name and derives an affinity from it, giving a declared type containing `DOUB` the same `REAL`
 affinity that the word `REAL` would. SQLite reports the declared text back verbatim, so `double
-precision` round-trips there too, which is what `autoUpdate` needs to reach a fixed point. -/
+precision` round-trips there too, which is what `autoUpdate` needs to reach a fixed point.
+
+For `int` that spelling is `bigint`, and it used to be `integer`. The two dialects do not mean the
+same thing by the latter: SQLite's `INTEGER` holds up to eight bytes, PostgreSQL's is `int4` and
+stops just past two billion. A model field is a Lean `Int`, which is neither — so the narrower
+reading was wrong everywhere, and merely unobservable on SQLite. What made it observable was a
+count of tokens, which passes two billion in the ordinary course of a month. `bigint` carries
+`INT` in its name, so SQLite gives it the same `INTEGER` affinity, and both dialects report the
+name back as written, so the fixed point `autoUpdate` needs still holds.
+
+An existing SQLite database declared under the old spelling will be seen by `autoUpdate` as
+differing in this column type. That is a rewrite of the declaration and not of any value: the
+affinity, and so what is stored, is identical either way. -/
 def DBType.toString : DBType → String
-  | .int => "integer"
+  | .int => "bigint"
   | .varchar n => s!"varchar({n})"
   | .text => "text"
   | .bool => "bool"

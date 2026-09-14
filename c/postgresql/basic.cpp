@@ -88,6 +88,28 @@ extern "C" lean_obj_res c_PQexec(lean_obj_arg conn_, lean_obj_arg query_) {
     return lean_io_result_mk_ok(box_PGresult(res));
 }
 
+/*
+  Close a connection now, rather than when the garbage collector gets to it.
+
+  `PGconn_finalizer` already calls `PQfinish`, which is enough to keep a program from leaking a
+  connection for ever but not enough to keep one from running out of them: a caller that opens a
+  connection per operation holds as many server backends as it has unreclaimed handles, and
+  `max_connections` is reached long before memory pressure makes Lean collect any of them.
+
+  Nulling the external data is what makes this safe to call before the finalizer runs: the
+  finalizer's own `if (conn)` then sees NULL and does nothing, so a handle that has been closed
+  explicitly and then dropped is finalized exactly once. Calling this twice is likewise a no-op
+  rather than a double free.
+*/
+extern "C" lean_obj_res c_PQfinish(lean_obj_arg conn_) {
+    PGconn* conn = unbox_PGconn(conn_);
+    if (conn) {
+        PQfinish(conn);
+        lean_set_external_data(conn_, NULL);
+    }
+    return lean_io_result_mk_ok(lean_box(0));
+}
+
 extern "C" lean_obj_res c_PQresultStatus(lean_obj_arg result_) {
     char* status = PQresStatus(PQresultStatus(unbox_PGresult(result_)));
     return lean_mk_string(status);

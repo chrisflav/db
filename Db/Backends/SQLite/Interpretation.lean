@@ -220,7 +220,10 @@ created by hand or by an earlier schema may declare any of them and they mean th
 here. -/
 def parseDBType (s : String) : Option DBType :=
   let low := s.toLower
-  if low == "integer" || low == "int" then
+  -- `bigint` is the spelling `DBType.toString` declares an int column with, and `integer`/`int`
+  -- are what it used to and what a hand-written table is as likely to say. All three get SQLite's
+  -- `INTEGER` affinity, so all three mean the same thing about what is stored.
+  if low == "bigint" || low == "integer" || low == "int" then
     some .int
   else if low == "bool" || low == "boolean" then
     some .bool

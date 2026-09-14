@@ -26,7 +26,19 @@ def connect (connInfo : String) : IO (Option Connection) := do
   if conn.connStatus == 0 then
     return some { raw := conn }
   else
+    -- A `PGconn` that failed to connect still holds the memory and the error text libpq put in
+    -- it, and still has to be handed back. Dropping it here would leave that to the finalizer;
+    -- closing it is what makes a run of failed connection attempts cost nothing that lasts.
+    conn.finish
     return none
+
+/-- Close the connection now rather than when the handle is collected.
+
+    See `Internal.Connection.finish`: idempotent, and safe to call on a handle that is used no
+    further. Every caller that opens a connection for a bounded piece of work should close it
+    when that work ends — `runDB` does. -/
+def Connection.close (conn : Connection) : IO Unit :=
+  conn.raw.finish
 
 /-- The result of a database query. -/
 structure ResultData : Type where
