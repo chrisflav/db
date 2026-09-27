@@ -19,7 +19,14 @@ inline static void PGconn_finalizer(void* conn_ptr) {
     }
 }
 
-inline static void PGresult_finalizer(void* result) {}
+// A PGresult owns every row it returned, in libpq's own malloc'd memory, until PQclear. Every
+// accessor below copies what it reads into a Lean object, so nothing outlives the result, and a
+// result does not depend on its connection, so clearing it after PQfinish is fine.
+inline static void PGresult_finalizer(void* result) {
+    if (result) {
+        PQclear((PGresult*) result);
+    }
+}
 
 inline static void noop_foreach(void* mod, b_lean_obj_arg fn) {}
 
@@ -29,7 +36,7 @@ static void initialize_classes() {
         g_PGconn_external_class = lean_register_external_class(PGconn_finalizer, noop_foreach);
     }
     if (!g_PGresult_external_class) {
-        g_PGresult_external_class = lean_register_external_class(NULL, noop_foreach);
+        g_PGresult_external_class = lean_register_external_class(PGresult_finalizer, noop_foreach);
     }
 }
 
