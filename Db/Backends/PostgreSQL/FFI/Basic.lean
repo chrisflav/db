@@ -34,10 +34,10 @@ opaque Connection : Type
 opaque Result : Type
 
 @[extern "c_PQconnectdb"]
-opaque connect (connInfo : String) : IO Connection
+opaque connect (connInfo : @& String) : IO Connection
 
 @[extern "c_PQstatus"]
-opaque Connection.connStatus (conn : Connection) : UInt8
+opaque Connection.connStatus (conn : @& Connection) : UInt8
 
 /-- Close the connection now.
 
@@ -49,16 +49,16 @@ opaque Connection.connStatus (conn : Connection) : UInt8
     Idempotent, and safe to call on a handle that is dropped afterwards: the shim clears the
     pointer, and the finalizer does nothing with a cleared one. -/
 @[extern "c_PQfinish"]
-opaque Connection.finish (conn : Connection) : IO Unit
+opaque Connection.finish (conn : @& Connection) : IO Unit
 
 @[extern "c_PQexec"]
-opaque Connection.exec (m : Connection) (query : String) : IO Result
+opaque Connection.exec (m : @& Connection) (query : @& String) : IO Result
 
 @[extern "c_PQresultStatus"]
-opaque Result.statusAsString (res : Result) : String
+opaque Result.statusAsString (res : @& Result) : String
 
 @[extern "c_PQresultErrorMessage"]
-opaque Result.errorMessage (res : Result) : String
+opaque Result.errorMessage (res : @& Result) : String
 
 /-- Return the status of a result in terms of `ResultStatus`. -/
 def Result.status (res : Result) : ResultStatus :=
@@ -77,7 +77,7 @@ inductive TransactionStatus where
   deriving Repr, DecidableEq
 
 @[extern "c_PQtransactionStatus"]
-opaque Connection.transactionStatusCode (conn : Connection) : UInt8
+opaque Connection.transactionStatusCode (conn : @& Connection) : UInt8
 
 def Connection.transactionStatus (conn : Connection) : TransactionStatus :=
   match conn.transactionStatusCode with
@@ -90,31 +90,31 @@ def Connection.transactionStatus (conn : Connection) : TransactionStatus :=
 /-- The number of rows the statement affected, as a decimal string; empty for a statement to which
 that does not apply. -/
 @[extern "c_PQcmdTuples"]
-opaque Result.cmdTuples (res : Result) : String
+opaque Result.cmdTuples (res : @& Result) : String
 
 @[extern "c_PQntuples"]
-opaque Result.ntuples (res : Result) : UInt32
+opaque Result.ntuples (res : @& Result) : UInt32
 
 @[extern "c_PQnfields"]
-opaque Result.nfields (res : Result) : UInt32
+opaque Result.nfields (res : @& Result) : UInt32
 
 @[extern "c_PQfname"]
-opaque Result.fname (res : Result) (columnNumber : UInt32) : String
+opaque Result.fname (res : @& Result) (columnNumber : UInt32) : String
 
 @[extern "c_PQftable"]
-opaque Result.ftable (res : Result) (columnNumber : UInt32) : UInt32
+opaque Result.ftable (res : @& Result) (columnNumber : UInt32) : UInt32
 
 @[extern "c_PQfnumber"]
-opaque Result.fnumber (res : Result) (columnName : String) : Int32
+opaque Result.fnumber (res : @& Result) (columnName : @& String) : Int32
 
 @[extern "c_PQgetisnull"]
-opaque Result.getisnull (res : Result) (rowNumber columNumber : UInt32) : UInt32
+opaque Result.getisnull (res : @& Result) (rowNumber columNumber : UInt32) : UInt32
 
 @[extern "c_PQgetlength"]
-opaque Result.getlength (res : Result) (rowNumber columNumber : UInt32) : UInt32
+opaque Result.getlength (res : @& Result) (rowNumber columNumber : UInt32) : UInt32
 
 -- TODO: change this to ByteArray or similar to support binary data
 @[extern "c_PQgetvalue"]
-opaque Result.getvalue (res : Result) (rowNumber columNumber : UInt32) : String
+opaque Result.getvalue (res : @& Result) (rowNumber columNumber : UInt32) : String
 
 end PostgreSQL.Internal

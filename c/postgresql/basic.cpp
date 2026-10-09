@@ -112,7 +112,9 @@ extern "C" lean_obj_res c_PQfinish(lean_obj_arg conn_) {
     PGconn* conn = unbox_PGconn(conn_);
     if (conn) {
         PQfinish(conn);
-        lean_set_external_data(conn_, NULL);
+        // In place: the handle is shared, and lean_set_external_data would copy a shared one and leave
+        // the original pointing at the freed connection for its finalizer to PQfinish again.
+        lean_to_external(conn_)->m_data = NULL;
     }
     return lean_io_result_mk_ok(lean_box(0));
 }
